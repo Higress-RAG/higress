@@ -72,15 +72,10 @@ func HandleDeleteChunk(ragClient *RAGClient) common.ToolHandlerFunc {
 
 // HandleCreateSession handles the creation of a chat session
 func HandleCreateSession(ragClient *RAGClient) common.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// TODO: Implement chat session creation logic
-		result := map[string]interface{}{
-			"session_id": "session-1",
-			"created_at": "2024-01-01T00:00:00Z",
-		}
-
-		return buildCallToolResult(result)
-	}
+    return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        s := ragClient.sessions.Create()
+        return buildCallToolResult(s)
+    }
 }
 
 // HandleGetSession handles retrieving session details
@@ -92,27 +87,28 @@ func HandleGetSession(ragClient *RAGClient) common.ToolHandlerFunc {
 			return nil, fmt.Errorf("invalid session_id argument")
 		}
 
-		// TODO: Implement session details retrieval logic
-		result := map[string]interface{}{
-			"session_id": sessionId,
-			"messages":   []interface{}{},
-		}
-
-		return buildCallToolResult(result)
-	}
+        if s, ok := ragClient.sessions.Get(sessionId); ok {
+            return buildCallToolResult(s)
+        }
+        return nil, fmt.Errorf("session not found: %s", sessionId)
+    }
 }
 
 // HandleListSessions handles listing all sessions
 func HandleListSessions(ragClient *RAGClient) common.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// TODO: Implement session listing logic
-		result := map[string]interface{}{
-			"sessions": []interface{}{},
-			"total":    0,
-		}
-
-		return buildCallToolResult(result)
-	}
+    return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        // optional pagination
+        arguments := request.Params.Arguments
+        off, okOff := arguments["offset"].(int)
+        lim, okLim := arguments["limit"].(int)
+        var list []*Session
+        if okOff && okLim && lim > 0 {
+            list = ragClient.sessions.ListRange(off, lim)
+        } else {
+            list = ragClient.sessions.List()
+        }
+        return buildCallToolResult(map[string]interface{}{"sessions": list, "total": len(list)})
+    }
 }
 
 // HandleDeleteSession handles the deletion of a session
@@ -124,15 +120,12 @@ func HandleDeleteSession(ragClient *RAGClient) common.ToolHandlerFunc {
 			return nil, fmt.Errorf("invalid session_id argument")
 		}
 
-		// TODO: Implement session deletion logic
-		result := map[string]interface{}{
-			"success":    true,
-			"message":    "Session deleted",
-			"session_id": sessionId,
-		}
-
-		return buildCallToolResult(result)
-	}
+        deleted := ragClient.sessions.Delete(sessionId)
+        if !deleted {
+            return nil, fmt.Errorf("session not found: %s", sessionId)
+        }
+        return buildCallToolResult(map[string]interface{}{"success": true, "session_id": sessionId})
+    }
 }
 
 // HandleSearch handles semantic search functionality
@@ -302,10 +295,13 @@ func GetGetSessionSchema() json.RawMessage {
 
 // GetListSessionsSchema returns the schema for list sessions tool
 func GetListSessionsSchema() json.RawMessage {
-	return json.RawMessage(`{
-		"type": "object",
-		"properties": {}
-	}`)
+    return json.RawMessage(`{
+        "type": "object",
+        "properties": {
+            "offset": {"type":"integer","description":"offset for pagination (optional)"},
+            "limit": {"type":"integer","description":"page size (optional)"}
+        }
+    }`)
 }
 
 // GetDeleteSessionSchema returns the schema for delete session tool
