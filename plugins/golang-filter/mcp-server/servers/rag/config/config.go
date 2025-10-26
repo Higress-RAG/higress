@@ -8,6 +8,8 @@ type Config struct {
 	LLM       LLMConfig       `json:"llm" yaml:"llm"`
 	Embedding EmbeddingConfig `json:"embedding" yaml:"embedding"`
 	VectorDB  VectorDBConfig  `json:"vectordb" yaml:"vectordb"`
+	// Pipeline holds optional enhanced RAG pipeline settings. If nil, fallback to baseline RAG.
+	Pipeline *PipelineConfig `json:"pipeline,omitempty" yaml:"pipeline,omitempty"`
 }
 
 // RAGConfig contains basic configuration for the RAG system

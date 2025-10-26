@@ -7,12 +7,16 @@ import (
 	"time"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/crag"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/embedding"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/post"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/textsplitter"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/vectordb"
-	"github.com/distribution/distribution/v3/uuid"
+	"github.com/google/uuid"
 )
 
 const (
@@ -27,6 +31,8 @@ type RAGClient struct {
 	embeddingProvider embedding.Provider
 	textSplitter      textsplitter.TextSplitter
 	llmProvider       llm.Provider
+	orch              *orchestrator.Orchestrator
+	sessions          SessionStore
 }
 
 // NewRAGClient creates a new RAG client instance
@@ -62,6 +68,36 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 		return nil, fmt.Errorf("create vector store provider failed, err: %w", err)
 	}
 	ragclient.vectordbProvider = provider
+
+	// Build enhanced pipeline orchestrator if configured
+	if ragclient.config.Pipeline != nil {
+		rets := []retriever.Retriever{&retriever.VectorRetriever{Embed: ragclient.embeddingProvider, Store: ragclient.vectordbProvider, TopK: ragclient.config.RAG.TopK, Threshold: ragclient.config.RAG.Threshold}}
+		// Optional: add BM25 / Web retrievers from config
+		for _, rc := range ragclient.config.Pipeline.Retrievers {
+			switch rc.Type {
+			case "bm25":
+				rets = append(rets, &retriever.BM25Retriever{Endpoint: rc.Params["endpoint"], Index: rc.Params["index"]})
+			case "web":
+				rets = append(rets, &retriever.WebSearchRetriever{Provider: rc.Provider, Endpoint: rc.Params["endpoint"], APIKey: rc.Params["api_key"]})
+			}
+		}
+		var rr post.Reranker
+		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Rerank.Enable {
+			rr = post.NewHTTPReranker(ragclient.config.Pipeline.Post.Rerank.Endpoint)
+		}
+		var ev crag.Evaluator
+		if ragclient.config.Pipeline.CRAG != nil {
+			cragCfg := ragclient.config.Pipeline.CRAG
+			if cragCfg.Evaluator.Provider == "http" && cragCfg.Evaluator.Endpoint != "" {
+				ev = &crag.HTTPEvaluator{
+					Endpoint:    cragCfg.Evaluator.Endpoint,
+					CorrectTh:   cragCfg.Evaluator.Correct,
+					IncorrectTh: cragCfg.Evaluator.Incorrect,
+				}
+			}
+		}
+		ragclient.orch = &orchestrator.Orchestrator{Cfg: ragclient.config, Retrievers: rets, Reranker: rr, Evaluator: ev}
+	}
 	return ragclient, nil
 }
 
@@ -92,7 +128,7 @@ func (r *RAGClient) CreateChunkFromText(text string, title string) ([]schema.Doc
 	results := make([]schema.Document, 0, len(docs))
 
 	for chunkIndex, doc := range docs {
-		doc.ID = uuid.Generate().String()
+		doc.ID = uuid.New().String()
 		doc.Metadata["chunk_index"] = chunkIndex
 		doc.Metadata["chunk_title"] = title
 		doc.Metadata["chunk_size"] = len(doc.Content)
@@ -137,14 +173,32 @@ func (r *RAGClient) Chat(query string) (string, error) {
 		return "", fmt.Errorf("llm provider not initialized")
 	}
 
-	docs, err := r.SearchChunks(query, r.config.RAG.TopK, r.config.RAG.Threshold)
-	if err != nil {
-		return "", fmt.Errorf("search chunks failed, err: %w", err)
-	}
-
-	contexts := make([]string, 0, len(docs))
-	for _, doc := range docs {
-		contexts = append(contexts, strings.ReplaceAll(doc.Document.Content, "\n", " "))
+	var contexts []string
+	// Prefer enhanced pipeline when configured; fallback to baseline search
+	if r.config.Pipeline != nil {
+		cand, _ := r.orch.Run(context.Background(), query)
+		if len(cand) == 0 {
+			// fallback to baseline
+			docs, err := r.SearchChunks(query, r.config.RAG.TopK, r.config.RAG.Threshold)
+			if err != nil {
+				return "", fmt.Errorf("search chunks failed, err: %w", err)
+			}
+			for _, doc := range docs {
+				contexts = append(contexts, strings.ReplaceAll(doc.Document.Content, "\n", " "))
+			}
+		} else {
+			for _, doc := range cand {
+				contexts = append(contexts, strings.ReplaceAll(doc.Document.Content, "\n", " "))
+			}
+		}
+	} else {
+		docs, err := r.SearchChunks(query, r.config.RAG.TopK, r.config.RAG.Threshold)
+		if err != nil {
+			return "", fmt.Errorf("search chunks failed, err: %w", err)
+		}
+		for _, doc := range docs {
+			contexts = append(contexts, strings.ReplaceAll(doc.Document.Content, "\n", " "))
+		}
 	}
 
 	prompt := llm.BuildPrompt(query, contexts, "\n\n")
