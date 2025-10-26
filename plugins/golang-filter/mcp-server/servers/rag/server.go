@@ -289,6 +289,29 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 			}
 		}
 
+		// retrieval profiles
+		if profiles, ok := pipelineConfig["retrieval_profiles"].([]any); ok {
+			for _, it := range profiles {
+				if m, ok := it.(map[string]any); ok {
+					prof := config.RetrievalProfile{}
+					if s, ok := m["name"].(string); ok { prof.Name = s }
+					if s, ok := m["intent"].(string); ok { prof.Intent = s }
+					if arr, ok := m["retrievers"].([]any); ok {
+						for _, a := range arr {
+							if s, ok := a.(string); ok { prof.Retrievers = append(prof.Retrievers, s) }
+						}
+					}
+					if v, ok := m["top_k"].(float64); ok { prof.TopK = int(v) }
+					if v, ok := m["threshold"].(float64); ok { prof.Threshold = v }
+					if b, ok := m["use_web"].(bool); ok { prof.UseWeb = b }
+					pc.RetrievalProfiles = append(pc.RetrievalProfiles, prof)
+				}
+			}
+		}
+		if def, ok := pipelineConfig["default_profile"].(string); ok {
+			pc.DefaultProfile = def
+		}
+
 		// post
 		if post, ok := pipelineConfig["post"].(map[string]any); ok {
 			pc.Post = &config.PostConfig{}
