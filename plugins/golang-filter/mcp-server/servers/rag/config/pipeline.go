@@ -15,6 +15,9 @@ type PipelineConfig struct {
     Pre *PreConfig `json:"pre,omitempty" yaml:"pre,omitempty"`
     // Retrieval backends
     Retrievers []RetrieverConfig `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
+    // Retrieval profiles define strategy per intent.
+    RetrievalProfiles []RetrievalProfile `json:"retrieval_profiles,omitempty" yaml:"retrieval_profiles,omitempty"`
+    DefaultProfile    string             `json:"default_profile,omitempty" yaml:"default_profile,omitempty"`
     // Post stage configuration
     Post *PostConfig `json:"post,omitempty" yaml:"post,omitempty"`
     // CRAG configuration
@@ -46,6 +49,16 @@ type RetrieverConfig struct {
     Provider string            `json:"provider,omitempty" yaml:"provider,omitempty"`
     // Arbitrary key/values for the provider implementation, e.g., endpoints/index/collection.
     Params map[string]string `json:"params,omitempty" yaml:"params,omitempty"`
+}
+
+// RetrievalProfile describes a strategy for a specific intent or query class.
+type RetrievalProfile struct {
+    Name       string   `json:"name" yaml:"name"`
+    Intent     string   `json:"intent,omitempty" yaml:"intent,omitempty"`
+    Retrievers []string `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
+    TopK       int      `json:"top_k,omitempty" yaml:"top_k,omitempty"`
+    Threshold  float64  `json:"threshold,omitempty" yaml:"threshold,omitempty"`
+    UseWeb     bool     `json:"use_web,omitempty" yaml:"use_web,omitempty"`
 }
 
 type PostConfig struct {
