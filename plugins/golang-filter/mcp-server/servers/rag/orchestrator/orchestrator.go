@@ -9,9 +9,13 @@ import (
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/crag"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/fusion"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator/preclient"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/post"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/metrics"
+	prepb "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/proto/precontract/v1"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
+	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 )
 
 // Orchestrator wires the enhanced RAG pipeline stages.
@@ -21,6 +25,7 @@ type Orchestrator struct {
 	RetrieverMap map[string]retriever.Retriever
 	Reranker     post.Reranker
 	Evaluator    crag.Evaluator
+	Pre          preclient.Client
 }
 
 // Run executes the pipeline for a given query and returns final candidates.
@@ -31,29 +36,142 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 		return nil, nil
 	}
 
+	// Pre stage: external or fallback heuristics
 	intent := classifyQuery(query)
 	profile := selectProfile(o.Cfg, intent.Intent)
-	profile = o.normalizeProfile(profile)
+    transformations := []string{}
+    var preTrans []*prepb.QueryTransformation
 	subQueries := []string{query}
-	if pc.EnablePre {
-		if o.Cfg.Pipeline.Pre != nil && o.Cfg.Pipeline.Pre.Rewrite.Enable {
-			_, dense := rewriteVariants(query)
-			query = dense // prefer dense as primary query for vector retrieval
-		}
-		if o.Cfg.Pipeline.Pre != nil && o.Cfg.Pipeline.Pre.Decompose.Enable && intent.MultiDoc {
-			subQueries = decompose(query)
-		}
-	}
+    var perTimeout time.Duration = 300 * time.Millisecond
+    if pc.EnablePre && o.Pre != nil && o.Cfg.Pipeline.Pre.Service.Endpoint != "" {
+        ctxPre, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
+        resp, err := o.Pre.Generate(ctxPre, &prepb.PreprocessRequest{Query: query})
+        cancel()
+        if err == nil && resp != nil {
+            // choose profile by suggested_profile first
+            if len(resp.Intents) > 0 && resp.Intents[0].SuggestedProfile != "" {
+                profile = profileByName(o.Cfg, resp.Intents[0].SuggestedProfile)
+            }
+            api.LogInfof("pre: profile=%s use_web=%v transforms=%d subqueries=%d", profile.Name, profile.UseWeb, len(transformations), len(subQueries))
+            // apply requires_web hint
+            if len(resp.Intents) > 0 {
+                profile.UseWeb = resp.Intents[0].RequiresWeb
+            }
+            // collect transformations in priority order
+            if len(resp.Transformations) > 0 {
+                // keep the structs for conditional appending later
+                for i := range resp.Transformations {
+                    t := resp.Transformations[i]
+                    if t != nil { preTrans = append(preTrans, t) }
+                }
+            }
+            // decomposition -> subqueries if provided
+            if resp.Decomposition != nil && len(resp.Decomposition.Tasks) > 0 {
+                subs := make([]string, 0, len(resp.Decomposition.Tasks))
+                for _, tk := range resp.Decomposition.Tasks {
+                    if tk.QueryText != "" {
+                        subs = append(subs, tk.QueryText)
+                    }
+                }
+                if len(subs) > 0 {
+                    subQueries = subs
+                }
+            }
+            // constraints -> timeouts
+            if resp.Constraints != nil {
+                if resp.Constraints.PerRetrieverTimeoutMs > 0 {
+                    perTimeout = time.Duration(resp.Constraints.PerRetrieverTimeoutMs) * time.Millisecond
+                } else if resp.Constraints.LatencyBudgetMs > 0 {
+                    perTimeout = time.Duration(resp.Constraints.LatencyBudgetMs/3) * time.Millisecond
+                }
+            }
+        } else {
+            api.LogWarnf("preprocessor call failed: %v", err)
+        }
+    } else if pc.EnablePre {
+        // fallback lightweight transformers
+        _, dense := rewriteVariants(query)
+        transformations = append(transformations, dense)
+        if intent.MultiDoc && o.Cfg.Pipeline.Pre.Decompose.Enable {
+            subQueries = decompose(query)
+        }
+    }
+    profile = o.normalizeProfile(profile)
+    // Defer adding transformations until after gating (so low-score branch can prioritize HYDE/expansion)
 
 	// Hybrid retrieval
 	lists := make([][]schema.SearchResult, 0)
 	activeRetrievers := resolveRetrievers(o, profile)
-	if len(activeRetrievers) == 0 && len(o.Retrievers) > 0 {
-		activeRetrievers = append(activeRetrievers, o.Retrievers[0])
+	// Two-phase gating: vector preflight to suppress/force web based on thresholds
+	if v := findRetriever(o, "vector"); v != nil && (profile.VectorGate > 0 || profile.VectorLowGate > 0) {
+		preCtx, cancel := context.WithTimeout(ctx, perTimeout)
+		res, _ := v.Search(preCtx, query, minInt(5, profile.TopK))
+		cancel()
+		var top1 float64 = -1
+		if len(res) > 0 { top1 = res[0].Score; metrics.ObserveVectorTop1(top1) }
+		// suppress web on high vector score
+		if profile.UseWeb && profile.VectorGate > 0 && top1 >= profile.VectorGate {
+			filtered := make([]retriever.Retriever, 0, len(activeRetrievers))
+			for _, r := range activeRetrievers {
+				if r != nil && r.Type() == "web" { continue }
+				filtered = append(filtered, r)
+			}
+			activeRetrievers = filtered
+			metrics.IncGating("suppress_web")
+			api.LogInfof("gating: vector top1 %.4f >= %.4f, suppress web", top1, profile.VectorGate)
+		}
+		// force web on low vector score
+		if profile.VectorLowGate > 0 && top1 >= 0 && top1 < profile.VectorLowGate && profile.ForceWebOnLow {
+			hasWeb := false
+			for _, r := range activeRetrievers { if r != nil && r.Type() == "web" { hasWeb = true; break } }
+			if !hasWeb {
+				if web := findRetriever(o, "web"); web != nil {
+					activeRetrievers = append(activeRetrievers, web)
+					metrics.IncGating("force_web")
+					api.LogInfof("gating: vector top1 %.4f < %.4f, force web", top1, profile.VectorLowGate)
+				}
+			} else {
+				metrics.IncGating("neutral")
+			}
+		}
 	}
+    if profile.MaxFanout > 0 && len(activeRetrievers) > profile.MaxFanout {
+        activeRetrievers = activeRetrievers[:profile.MaxFanout]
+    }
+    // Append Pre transformations: prioritize HYDE/EXPANSION when vector low-score
+    if len(preTrans) > 0 {
+        // low-score condition derived from gates
+        var low bool
+        // We don't have top1 accessible here; reuse metrics side-effects would be hacky.
+        // Approximate by using config gates: if low gate set and web is enabled, bias to include HYDE/EXPANSION.
+        if profile.VectorLowGate > 0 && profile.ForceWebOnLow {
+            low = true
+        }
+        if low {
+            pri := make([]string, 0)
+            for _, t := range preTrans {
+                if t != nil && (t.Type == prepb.TransformationType_TRANSFORMATION_TYPE_HYDE_SEED || t.Type == prepb.TransformationType_TRANSFORMATION_TYPE_QUERY_EXPANSION) && t.Text != "" {
+                    pri = append(pri, t.Text)
+                }
+            }
+            if len(pri) > 0 {
+                // put priority transforms in front
+                subQueries = append(pri, subQueries...)
+            }
+        }
+        // Append all transformed queries for completeness
+        for _, t := range preTrans { if t != nil && t.Text != "" { transformations = append(transformations, t.Text) } }
+    }
+    if len(transformations) > 0 {
+        subQueries = append(subQueries, transformations...)
+    }
+    if len(activeRetrievers) == 0 && len(o.Retrievers) > 0 {
+        activeRetrievers = append(activeRetrievers, o.Retrievers[0])
+    }
+    api.LogInfof("retrieval: profile=%s retrievers=%d per_timeout_ms=%d", profile.Name, len(activeRetrievers), perTimeout.Milliseconds())
 	if pc.EnableHybrid {
-		for _, sq := range expandQuery(profile, subQueries) {
-			qctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+        for _, sq := range expandQuery(profile, subQueries) {
+            qctx, cancel := context.WithTimeout(ctx, perTimeout)
 			var wg sync.WaitGroup
 			resCh := make(chan []schema.SearchResult, len(activeRetrievers))
 			for _, r := range activeRetrievers {
@@ -61,8 +179,16 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 				wg.Add(1)
 				go func(topK int) {
 					defer wg.Done()
-					if res, err := rr.Search(qctx, sq, topK); err == nil && len(res) > 0 {
+					// cap per-retriever topK when configured
+					effK := topK
+					if profile.PerRetrieverTopK > 0 && profile.PerRetrieverTopK < effK { effK = profile.PerRetrieverTopK }
+					start := time.Now()
+					res, err := rr.Search(qctx, sq, effK)
+					if err == nil && len(res) > 0 {
+						metrics.ObserveRetriever(rr.Type(), start, len(res))
 						resCh <- res
+					} else if err == nil {
+						metrics.ObserveRetriever(rr.Type(), start, 0)
 					}
 				}(profile.TopK)
 			}
@@ -85,6 +211,7 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 	if rrfk <= 0 {
 		rrfk = 60
 	}
+	metrics.ObserveFusion(len(lists))
 	fused := fusion.RRFScore(lists, rrfk)
 
 	// Post-processing
@@ -131,6 +258,7 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 			return fused, nil
 		}
 		_ = score // score could be logged/returned later
+		metrics.IncCRAGVerdict(verdictToLabel(verdict))
 		switch verdict {
 		case crag.VerdictCorrect:
 			fused = crag.CorrectAction(fused)
@@ -144,6 +272,35 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 	return fused, nil
 }
 
+func profileByName(cfg *config.Config, name string) config.RetrievalProfile {
+	if cfg == nil || cfg.Pipeline == nil {
+		return config.RetrievalProfile{Name: "default"}
+	}
+	for i := range cfg.Pipeline.RetrievalProfiles {
+		if strings.EqualFold(cfg.Pipeline.RetrievalProfiles[i].Name, name) {
+			return cfg.Pipeline.RetrievalProfiles[i]
+		}
+	}
+	return config.RetrievalProfile{Name: name}
+}
+
+func minInt(a, b int) int {
+    if a < b { return a }
+    return b
+}
+
+func verdictToLabel(v crag.Verdict) string {
+    switch v {
+    case crag.VerdictCorrect:
+        return "correct"
+    case crag.VerdictIncorrect:
+        return "incorrect"
+    case crag.VerdictAmbiguous:
+        return "ambiguous"
+    default:
+        return "unknown"
+    }
+}
 func (o *Orchestrator) normalizeProfile(profile config.RetrievalProfile) config.RetrievalProfile {
 	if profile.TopK <= 0 {
 		profile.TopK = defaultTopK(o.Cfg)

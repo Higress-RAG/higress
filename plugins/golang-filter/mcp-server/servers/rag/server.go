@@ -1,12 +1,13 @@
 package rag
 
 import (
-	"errors"
-	"fmt"
+    "errors"
+    "fmt"
+    "strings"
 
-	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
-	"github.com/alibaba/higress/plugins/golang-filter/mcp-session/common"
-	"github.com/mark3labs/mcp-go/mcp"
+    "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
+    "github.com/alibaba/higress/plugins/golang-filter/mcp-session/common"
+    "github.com/mark3labs/mcp-go/mcp"
 )
 
 const Version = "1.0.0"
@@ -269,6 +270,10 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 			if de, ok := pre["decompose"].(map[string]any); ok {
 				if b, ok := de["enable"].(bool); ok { pc.Pre.Decompose.Enable = b }
 			}
+			if svc, ok := pre["service"].(map[string]any); ok {
+				if s, ok := svc["provider"].(string); ok { pc.Pre.Service.Provider = s }
+				if s, ok := svc["endpoint"].(string); ok { pc.Pre.Service.Endpoint = s }
+			}
 		}
 
 		// retrievers
@@ -304,6 +309,11 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 					if v, ok := m["top_k"].(float64); ok { prof.TopK = int(v) }
 					if v, ok := m["threshold"].(float64); ok { prof.Threshold = v }
 					if b, ok := m["use_web"].(bool); ok { prof.UseWeb = b }
+					if v, ok := m["max_fanout"].(float64); ok { prof.MaxFanout = int(v) }
+					if v, ok := m["vector_gate"].(float64); ok { prof.VectorGate = v }
+					if v, ok := m["vector_low_gate"].(float64); ok { prof.VectorLowGate = v }
+					if b, ok := m["force_web_on_low"].(bool); ok { prof.ForceWebOnLow = b }
+					if v, ok := m["per_retriever_top_k"].(float64); ok { prof.PerRetrieverTopK = int(v) }
 					pc.RetrievalProfiles = append(pc.RetrievalProfiles, prof)
 				}
 			}
@@ -369,7 +379,48 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 
 		c.config.Pipeline = pc
 	}
+
+	// Basic validation for retrieval profiles/retrievers
+	if c.config.Pipeline != nil {
+		seen := map[string]struct{}{}
+		for _, prof := range c.config.Pipeline.RetrievalProfiles {
+			if _, ok := seen[prof.Name]; ok {
+				return fmt.Errorf("duplicate retrieval profile name: %s", prof.Name)
+			}
+			seen[prof.Name] = struct{}{}
+		}
+		// validate retriever references are resolvable against configured retrievers
+		allowed := map[string]struct{}{ "vector": {} }
+		for _, rc := range c.config.Pipeline.Retrievers {
+			if rc.Type != "" { allowed[normalizeKey(rc.Type)] = struct{}{} }
+			if rc.Type != "" && rc.Provider != "" { allowed[normalizeKey(rc.Type+":"+rc.Provider)] = struct{}{} }
+			if name, ok := rc.Params["name"]; ok && name != "" { allowed[normalizeKey(name)] = struct{}{} }
+		}
+		for _, prof := range c.config.Pipeline.RetrievalProfiles {
+			for _, ref := range prof.Retrievers {
+				key := normalizeKey(ref)
+				if _, ok := allowed[key]; !ok {
+					return fmt.Errorf("profile %s references unknown retriever: %s", prof.Name, ref)
+				}
+			}
+		}
+		// pre.service provider sanity check
+		if c.config.Pipeline.Pre != nil && c.config.Pipeline.Pre.Service.Provider != "" {
+			p := c.config.Pipeline.Pre.Service.Provider
+			if p != "http" && p != "grpc" {
+				return fmt.Errorf("pre.service.provider must be http or grpc, got: %s", p)
+			}
+		}
+	}
 	return nil
+}
+
+func normalizeKey(s string) string {
+    if s == "" { return s }
+    // trim spaces and lower
+    var b []rune
+    for _, r := range s { if r != ' ' && r != '\t' && r != '\n' { b = append(b, r) } }
+    return strings.ToLower(string(b))
 }
 
 func (c *RAGConfig) NewServer(serverName string) (*common.MCPServer, error) {

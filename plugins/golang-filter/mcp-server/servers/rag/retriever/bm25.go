@@ -20,6 +20,7 @@ type BM25Retriever struct {
     Endpoint string
     Index    string
     Client   *httpx.Client
+    MaxTopK  int
 }
 
 func (r *BM25Retriever) Type() string { return "bm25" }
@@ -46,6 +47,7 @@ func (r *BM25Retriever) Search(ctx context.Context, query string, topK int) ([]s
         return []schema.SearchResult{}, nil
     }
     if topK <= 0 { topK = 10 }
+    if r.MaxTopK > 0 && r.MaxTopK < topK { topK = r.MaxTopK }
     q := esSearchRequest{
         Size: topK,
         Query: map[string]interface{}{

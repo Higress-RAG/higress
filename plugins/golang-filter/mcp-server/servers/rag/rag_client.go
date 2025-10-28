@@ -1,10 +1,11 @@
 package rag
 
 import (
-	"context"
-	"fmt"
-	"strings"
-	"time"
+    "context"
+    "fmt"
+    "strconv"
+    "strings"
+    "time"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/httpx"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
@@ -12,6 +13,7 @@ import (
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/embedding"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator/preclient"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/post"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
@@ -102,23 +104,25 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 		// Optional: add BM25 / Web retrievers from config
 		for _, rc := range ragclient.config.Pipeline.Retrievers {
 			switch rc.Type {
-			case "bm25":
-				bm := &retriever.BM25Retriever{
-					Endpoint: rc.Params["endpoint"],
-					Index:    rc.Params["index"],
-					Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
-				}
-				retrievers = append(retrievers, bm)
-				register(bm, rc.Type, rc.Provider, rc.Params["name"])
-			case "web":
-				web := &retriever.WebSearchRetriever{
-					Provider: rc.Provider,
-					Endpoint: rc.Params["endpoint"],
-					APIKey:   rc.Params["api_key"],
-					Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
-				}
-				retrievers = append(retrievers, web)
-				register(web, rc.Type, rc.Provider, rc.Params["name"])
+            case "bm25":
+                bm := &retriever.BM25Retriever{
+                    Endpoint: rc.Params["endpoint"],
+                    Index:    rc.Params["index"],
+                    Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
+                }
+                if tk := rc.Params["top_k"]; tk != "" { if n, err := strconv.Atoi(tk); err == nil { bm.MaxTopK = n } }
+                retrievers = append(retrievers, bm)
+                register(bm, rc.Type, rc.Provider, rc.Params["name"])
+            case "web":
+                web := &retriever.WebSearchRetriever{
+                    Provider: rc.Provider,
+                    Endpoint: rc.Params["endpoint"],
+                    APIKey:   rc.Params["api_key"],
+                    Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
+                }
+                if tk := rc.Params["top_k"]; tk != "" { if n, err := strconv.Atoi(tk); err == nil { web.MaxTopK = n } }
+                retrievers = append(retrievers, web)
+                register(web, rc.Type, rc.Provider, rc.Params["name"])
 			case "vector":
 				// Allow registering additional vector retrievers with custom name/provider if needed.
 				register(vectorRet, rc.Type, rc.Provider, rc.Params["name"])
@@ -141,7 +145,16 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 				}
 			}
 		}
-		ragclient.orch = &orchestrator.Orchestrator{Cfg: ragclient.config, Retrievers: retrievers, RetrieverMap: retrieverMap, Reranker: rr, Evaluator: ev}
+		// Pre client (optional)
+		var preCli preclient.Client
+		if ragclient.config.Pipeline.Pre.Service.Endpoint != "" {
+			httpCli := httpx.NewFromConfig(ragclient.config.Pipeline.HTTP)
+			pcfg := ragclient.config.Pipeline.Pre.Service
+			if cli, err := preclient.New(pcfg.Provider, pcfg.Endpoint, httpCli); err == nil {
+				preCli = cli
+			}
+		}
+		ragclient.orch = &orchestrator.Orchestrator{Cfg: ragclient.config, Retrievers: retrievers, RetrieverMap: retrieverMap, Reranker: rr, Evaluator: ev, Pre: preCli}
 	}
 	return ragclient, nil
 }
