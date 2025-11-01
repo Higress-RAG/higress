@@ -76,6 +76,65 @@ type FieldMapping struct {
 	Properties   map[string]interface{} `json:"properties,omitempty" yaml:"properties,omitempty"`
 }
 
+
+type PreRetrieveConfig struct {
+	Provider  string                 `json:"provider" yaml:"provider"`
+	TimeOutMS int                    `json:"time_out_ms" yaml:"time_out_ms"`
+	LLM       LLMConfig              `json:"llm" yaml:"llm"` // LLM 配置用于查询改写
+	Memory    MemoryConfig           `json:"memory" yaml:"memory"`
+	Alignment ContextAlignmentConfig `json:"alignment" yaml:"alignment"`
+	Planning  PreQRAGPlanningConfig  `json:"planning" yaml:"planning"`
+	Expansion ExpansionConfig        `json:"expansion" yaml:"expansion"`
+	HyDE      HyDEConfig             `json:"hyde" yaml:"hyde"`
+}
+
+// MemoryConfig 定义记忆采集配置
+type MemoryConfig struct {
+	Enabled        bool `json:"enabled" yaml:"enabled"`
+	LastNRounds    int  `json:"last_n_rounds" yaml:"last_n_rounds"`     // 最近 N 轮对话
+	EnableDocIDs   bool `json:"enable_doc_ids" yaml:"enable_doc_ids"`   // 是否启用文档 ID
+	EnableSession  bool `json:"enable_session" yaml:"enable_session"`   // 是否启用会话记忆
+	EnableExternal bool `json:"enable_external" yaml:"enable_external"` // 是否启用外部记忆
+}
+
+// ContextAlignmentConfig 定义上下文对齐配置
+type ContextAlignmentConfig struct {
+	Enabled              bool    `json:"enabled" yaml:"enabled"`
+	EnablePronouns       bool    `json:"enable_pronouns" yaml:"enable_pronouns"`               // 代词消解
+	EnableTimeNorm       bool    `json:"enable_time_norm" yaml:"enable_time_norm"`             // 时间归一化
+	EnableAnchor         bool    `json:"enable_anchor" yaml:"enable_anchor"`                   // 锚点裁决
+	AnchorScoreThreshold float64 `json:"anchor_score_threshold" yaml:"anchor_score_threshold"` // 锚点分数阈值
+	MaxAnchors           int     `json:"max_anchors" yaml:"max_anchors"`                       // 最大锚点数
+}
+
+// PreQRAGPlanningConfig 定义 PreQRAG 规划器配置
+type PreQRAGPlanningConfig struct {
+	Enabled                bool `json:"enabled" yaml:"enabled"`
+	EnableNormalization    bool `json:"enable_normalization" yaml:"enable_normalization"`         // 规范化
+	EnableDecomposition    bool `json:"enable_decomposition" yaml:"enable_decomposition"`         // 子问题分解
+	EnableChannelRewrite   bool `json:"enable_channel_rewrite" yaml:"enable_channel_rewrite"`     // 通道感知重写
+	MaxSubQueries          int  `json:"max_sub_queries" yaml:"max_sub_queries"`                   // 最大子查询数
+	EnableCardinalityPrior bool `json:"enable_cardinality_prior" yaml:"enable_cardinality_prior"` // 单/多文档先验判定
+}
+
+// ExpansionConfig 定义扩写配置
+type ExpansionConfig struct {
+	Enabled          bool `json:"enabled" yaml:"enabled"`
+	MaxTerms         int  `json:"max_terms" yaml:"max_terms"`                 // 最大扩展词数
+	EnableTaxonomy   bool `json:"enable_taxonomy" yaml:"enable_taxonomy"`     // 域内分类
+	EnableSynonyms   bool `json:"enable_synonyms" yaml:"enable_synonyms"`     // 同义词
+	EnableAttributes bool `json:"enable_attributes" yaml:"enable_attributes"` // 属性对
+}
+
+// HyDEConfig 定义 HyDE (Hypothetical Document Embeddings) 配置
+type HyDEConfig struct {
+	Enabled               bool `json:"enabled" yaml:"enabled"`
+	MinQueryLength        int  `json:"min_query_length" yaml:"min_query_length"`               // 最小查询长度
+	GeneratedDocLength    int  `json:"generated_doc_length" yaml:"generated_doc_length"`       // 生成文档长度
+	EnablePerplexityCheck bool `json:"enable_perplexity_check" yaml:"enable_perplexity_check"` // 困惑度检查
+	EnableNLIGuardrail    bool `json:"enable_nli_guardrail" yaml:"enable_nli_guardrail"`       // NLI 护栏
+}
+
 func (f FieldMapping) IsPrimaryKey() bool {
 	return f.StandardName == "id"
 }
