@@ -1,20 +1,21 @@
 package rag
 
 import (
-    "context"
-    "fmt"
-    "strconv"
-    "strings"
-    "time"
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/httpx"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/crag"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/embedding"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/gating"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
-	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator"
-	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator/preclient"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/post"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/profile"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retrieval"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/textsplitter"
@@ -34,8 +35,12 @@ type RAGClient struct {
 	embeddingProvider embedding.Provider
 	textSplitter      textsplitter.TextSplitter
 	llmProvider       llm.Provider
-	orch              *orchestrator.Orchestrator
 	sessions          SessionStore
+	profileProvider   profile.Provider
+	retrievalProvider retrieval.Provider
+	gatingProvider    gating.Provider
+	reranker          post.Reranker
+	evaluator         crag.Evaluator
 }
 
 // NewRAGClient creates a new RAG client instance
@@ -72,7 +77,7 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 	}
 	ragclient.vectordbProvider = provider
 
-	// Build enhanced pipeline orchestrator if configured
+	// Build enhanced pipeline providers if configured
 	if ragclient.config.Pipeline != nil {
 		retrievers := make([]retriever.Retriever, 0, len(ragclient.config.Pipeline.Retrievers)+1)
 		retrieverMap := make(map[string]retriever.Retriever)
@@ -104,25 +109,33 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 		// Optional: add BM25 / Web retrievers from config
 		for _, rc := range ragclient.config.Pipeline.Retrievers {
 			switch rc.Type {
-            case "bm25":
-                bm := &retriever.BM25Retriever{
-                    Endpoint: rc.Params["endpoint"],
-                    Index:    rc.Params["index"],
-                    Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
-                }
-                if tk := rc.Params["top_k"]; tk != "" { if n, err := strconv.Atoi(tk); err == nil { bm.MaxTopK = n } }
-                retrievers = append(retrievers, bm)
-                register(bm, rc.Type, rc.Provider, rc.Params["name"])
-            case "web":
-                web := &retriever.WebSearchRetriever{
-                    Provider: rc.Provider,
-                    Endpoint: rc.Params["endpoint"],
-                    APIKey:   rc.Params["api_key"],
-                    Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
-                }
-                if tk := rc.Params["top_k"]; tk != "" { if n, err := strconv.Atoi(tk); err == nil { web.MaxTopK = n } }
-                retrievers = append(retrievers, web)
-                register(web, rc.Type, rc.Provider, rc.Params["name"])
+			case "bm25":
+				bm := &retriever.BM25Retriever{
+					Endpoint: rc.Params["endpoint"],
+					Index:    rc.Params["index"],
+					Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
+				}
+				if tk := rc.Params["top_k"]; tk != "" {
+					if n, err := strconv.Atoi(tk); err == nil {
+						bm.MaxTopK = n
+					}
+				}
+				retrievers = append(retrievers, bm)
+				register(bm, rc.Type, rc.Provider, rc.Params["name"])
+			case "web":
+				web := &retriever.WebSearchRetriever{
+					Provider: rc.Provider,
+					Endpoint: rc.Params["endpoint"],
+					APIKey:   rc.Params["api_key"],
+					Client:   httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
+				}
+				if tk := rc.Params["top_k"]; tk != "" {
+					if n, err := strconv.Atoi(tk); err == nil {
+						web.MaxTopK = n
+					}
+				}
+				retrievers = append(retrievers, web)
+				register(web, rc.Type, rc.Provider, rc.Params["name"])
 			case "vector":
 				// Allow registering additional vector retrievers with custom name/provider if needed.
 				register(vectorRet, rc.Type, rc.Provider, rc.Params["name"])
@@ -130,31 +143,32 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 				// unknown type ignored for now
 			}
 		}
-		var rr post.Reranker
-		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Rerank.Enable {
-			rr = post.NewHTTPReranker(ragclient.config.Pipeline.Post.Rerank.Endpoint)
+
+		// Initialize providers
+		ragclient.profileProvider = profile.NewProvider(ragclient.config.Pipeline)
+
+		rrfK := ragclient.config.Pipeline.RRFK
+		if rrfK <= 0 {
+			rrfK = 60
 		}
-		var ev crag.Evaluator
+		ragclient.retrievalProvider = retrieval.NewProvider(retrievers, retrieverMap, rrfK)
+
+		ragclient.gatingProvider = gating.NewProvider(vectorRet)
+
+		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Rerank.Enable {
+			ragclient.reranker = post.NewHTTPReranker(ragclient.config.Pipeline.Post.Rerank.Endpoint)
+		}
+
 		if ragclient.config.Pipeline.CRAG != nil {
 			cragCfg := ragclient.config.Pipeline.CRAG
 			if cragCfg.Evaluator.Provider == "http" && cragCfg.Evaluator.Endpoint != "" {
-				ev = &crag.HTTPEvaluator{
+				ragclient.evaluator = &crag.HTTPEvaluator{
 					Endpoint:    cragCfg.Evaluator.Endpoint,
 					CorrectTh:   cragCfg.Evaluator.Correct,
 					IncorrectTh: cragCfg.Evaluator.Incorrect,
 				}
 			}
 		}
-		// Pre client (optional)
-		var preCli preclient.Client
-		if ragclient.config.Pipeline.Pre.Service.Endpoint != "" {
-			httpCli := httpx.NewFromConfig(ragclient.config.Pipeline.HTTP)
-			pcfg := ragclient.config.Pipeline.Pre.Service
-			if cli, err := preclient.New(pcfg.Provider, pcfg.Endpoint, httpCli); err == nil {
-				preCli = cli
-			}
-		}
-		ragclient.orch = &orchestrator.Orchestrator{Cfg: ragclient.config, Retrievers: retrievers, RetrieverMap: retrieverMap, Reranker: rr, Evaluator: ev, Pre: preCli}
 	}
 	return ragclient, nil
 }
@@ -233,9 +247,10 @@ func (r *RAGClient) Chat(query string) (string, error) {
 
 	var contexts []string
 	// Prefer enhanced pipeline when configured; fallback to baseline search
-	if r.config.Pipeline != nil {
-		cand, _ := r.orch.Run(context.Background(), query)
-		if len(cand) == 0 {
+	if r.config.Pipeline != nil && r.retrievalProvider != nil {
+		// Use provider-based pipeline
+		results := r.runEnhancedPipeline(context.Background(), query)
+		if len(results) == 0 {
 			// fallback to baseline
 			docs, err := r.SearchChunks(query, r.config.RAG.TopK, r.config.RAG.Threshold)
 			if err != nil {
@@ -245,7 +260,7 @@ func (r *RAGClient) Chat(query string) (string, error) {
 				contexts = append(contexts, strings.ReplaceAll(doc.Document.Content, "\n", " "))
 			}
 		} else {
-			for _, doc := range cand {
+			for _, doc := range results {
 				contexts = append(contexts, strings.ReplaceAll(doc.Document.Content, "\n", " "))
 			}
 		}
@@ -265,4 +280,73 @@ func (r *RAGClient) Chat(query string) (string, error) {
 		return "", fmt.Errorf("generate completion failed, err: %w", err)
 	}
 	return resp, nil
+}
+
+// runEnhancedPipeline executes the enhanced RAG pipeline using providers
+func (r *RAGClient) runEnhancedPipeline(ctx context.Context, query string) []schema.SearchResult {
+	// Select profile
+	prof := r.profileProvider.SelectDefault()
+	if r.config.Pipeline.DefaultProfile != "" {
+		if p := r.profileProvider.SelectByName(r.config.Pipeline.DefaultProfile); p.Name != "" {
+			prof = p
+		}
+	}
+	prof = r.profileProvider.Normalize(prof)
+
+	// Gating decision
+	if r.gatingProvider != nil && (prof.VectorGate > 0 || prof.VectorLowGate > 0) {
+		decision := r.gatingProvider.Evaluate(ctx, query, prof, nil)
+		prof = r.gatingProvider.ApplyDecision(decision, prof)
+	}
+
+	// Retrieval
+	queries := []string{query}
+	results := r.retrievalProvider.Retrieve(ctx, queries, prof, nil)
+
+	// Reranking
+	if len(results) > 0 && r.config.Pipeline.EnablePost && r.config.Pipeline.Post != nil &&
+		r.config.Pipeline.Post.Rerank.Enable && r.reranker != nil {
+		topN := r.config.Pipeline.Post.Rerank.TopN
+		if topN <= 0 || topN > len(results) {
+			topN = len(results)
+		}
+		if reranked, err := r.reranker.Rerank(ctx, query, results, topN); err == nil && len(reranked) > 0 {
+			results = reranked
+		}
+	}
+
+	// Compression
+	if len(results) > 0 && r.config.Pipeline.EnablePost && r.config.Pipeline.Post != nil &&
+		r.config.Pipeline.Post.Compress.Enable {
+		ratio := r.config.Pipeline.Post.Compress.TargetRatio
+		for i := range results {
+			results[i].Document.Content = post.CompressText(results[i].Document.Content, ratio)
+		}
+	}
+
+	// CRAG evaluation
+	if len(results) > 0 && r.config.Pipeline.EnableCRAG && r.evaluator != nil {
+		var builder strings.Builder
+		limit := len(results)
+		if limit > 5 {
+			limit = 5
+		}
+		for i := 0; i < limit; i++ {
+			builder.WriteString(results[i].Document.Content)
+			builder.WriteString("\n\n")
+		}
+		_, verdict, err := r.evaluator.Evaluate(ctx, query, builder.String())
+		if err == nil {
+			switch verdict {
+			case crag.VerdictCorrect:
+				results = crag.CorrectAction(results)
+			case crag.VerdictIncorrect:
+				results = crag.IncorrectAction()
+			case crag.VerdictAmbiguous:
+				results = crag.AmbiguousAction(results, nil)
+			}
+		}
+	}
+
+	return results
 }
