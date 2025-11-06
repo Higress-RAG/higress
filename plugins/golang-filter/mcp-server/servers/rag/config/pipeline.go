@@ -11,6 +11,11 @@ type PipelineConfig struct {
 	// RRF fusion parameter for hybrid retrieval; typical default 60
 	RRFK int `json:"rrf_k,omitempty" yaml:"rrf_k,omitempty"`
 
+	// Fusion strategy configuration
+	Fusion *FusionConfig `json:"fusion,omitempty" yaml:"fusion,omitempty"`
+	// Query router configuration
+	Router *RouterConfig `json:"router,omitempty" yaml:"router,omitempty"`
+
 	// Pre stage configuration
 	Pre *PreConfig `json:"pre,omitempty" yaml:"pre,omitempty"`
 	// Retrieval backends
@@ -61,22 +66,22 @@ type RetrieverConfig struct {
 
 // RetrievalProfile describes a strategy for a specific intent or query class.
 type RetrievalProfile struct {
-    Name       string   `json:"name" yaml:"name"`
-    Intent     string   `json:"intent,omitempty" yaml:"intent,omitempty"`
-    Retrievers []string `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
-    TopK       int      `json:"top_k,omitempty" yaml:"top_k,omitempty"`
-    Threshold  float64  `json:"threshold,omitempty" yaml:"threshold,omitempty"`
-    UseWeb     bool     `json:"use_web,omitempty" yaml:"use_web,omitempty"`
-    // MaxFanout caps concurrent retriever fan-out for this profile (0 => no cap)
-    MaxFanout  int      `json:"max_fanout,omitempty" yaml:"max_fanout,omitempty"`
-    // VectorGate: if vector Top1 score >= this threshold, skip web retriever
-    VectorGate float64  `json:"vector_gate,omitempty" yaml:"vector_gate,omitempty"`
-    // VectorLowGate: if vector Top1 score < this threshold, force-enable web retriever (if available)
-    VectorLowGate float64 `json:"vector_low_gate,omitempty" yaml:"vector_low_gate,omitempty"`
-    // ForceWebOnLow: when true and vector Top1 < VectorLowGate, ensure web retriever is used
-    ForceWebOnLow bool `json:"force_web_on_low,omitempty" yaml:"force_web_on_low,omitempty"`
-    // PerRetrieverTopK: cap TopK per retriever; 0 => use TopK
-    PerRetrieverTopK int `json:"per_retriever_top_k,omitempty" yaml:"per_retriever_top_k,omitempty"`
+	Name       string   `json:"name" yaml:"name"`
+	Intent     string   `json:"intent,omitempty" yaml:"intent,omitempty"`
+	Retrievers []string `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
+	TopK       int      `json:"top_k,omitempty" yaml:"top_k,omitempty"`
+	Threshold  float64  `json:"threshold,omitempty" yaml:"threshold,omitempty"`
+	UseWeb     bool     `json:"use_web,omitempty" yaml:"use_web,omitempty"`
+	// MaxFanout caps concurrent retriever fan-out for this profile (0 => no cap)
+	MaxFanout int `json:"max_fanout,omitempty" yaml:"max_fanout,omitempty"`
+	// VectorGate: if vector Top1 score >= this threshold, skip web retriever
+	VectorGate float64 `json:"vector_gate,omitempty" yaml:"vector_gate,omitempty"`
+	// VectorLowGate: if vector Top1 score < this threshold, force-enable web retriever (if available)
+	VectorLowGate float64 `json:"vector_low_gate,omitempty" yaml:"vector_low_gate,omitempty"`
+	// ForceWebOnLow: when true and vector Top1 < VectorLowGate, ensure web retriever is used
+	ForceWebOnLow bool `json:"force_web_on_low,omitempty" yaml:"force_web_on_low,omitempty"`
+	// PerRetrieverTopK: cap TopK per retriever; 0 => use TopK
+	PerRetrieverTopK int `json:"per_retriever_top_k,omitempty" yaml:"per_retriever_top_k,omitempty"`
 }
 
 type PostConfig struct {
@@ -127,6 +132,24 @@ type HTTPClientConfig struct {
 	CircuitOpenSeconds     int      `json:"circuit_open_seconds,omitempty" yaml:"circuit_open_seconds,omitempty"`
 }
 
+// FusionConfig defines the fusion strategy configuration
+type FusionConfig struct {
+	// Strategy: "rrf" (default), "weighted", "linear", "distribution"
+	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	// Params: strategy-specific parameters (e.g., weights, k value)
+	Params map[string]interface{} `json:"params,omitempty" yaml:"params,omitempty"`
+}
+
+// RouterConfig defines the query routing configuration
+type RouterConfig struct {
+	// Provider: "rule" (default), "http", "hybrid"
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// Endpoint: HTTP endpoint for external routing service
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	// Enable: whether to enable query routing
+	Enable bool `json:"enable,omitempty" yaml:"enable,omitempty"`
+}
+
 // DefaultPipeline returns a safe default pipeline configuration.
 func DefaultPipeline() *PipelineConfig {
 	return &PipelineConfig{
@@ -135,6 +158,7 @@ func DefaultPipeline() *PipelineConfig {
 		EnablePost:   false,
 		EnableCRAG:   false,
 		RRFK:         60,
+		Fusion:       &FusionConfig{Strategy: "rrf", Params: map[string]interface{}{"k": 60}},
 		Post:         &PostConfig{},
 		CRAG:         &CRAGConfig{},
 	}

@@ -17,21 +17,31 @@ import (
 // Provider handles retrieval orchestration
 type Provider interface {
 	Retrieve(ctx context.Context, queries []string, profile config.RetrievalProfile, m *metrics.RetrievalMetrics) []schema.SearchResult
+	SetFusionStrategy(strategy fusion.Strategy)
 }
 
 // defaultProvider is the default implementation
 type defaultProvider struct {
-	retrievers   []retriever.Retriever
-	retrieverMap map[string]retriever.Retriever
-	rrfK         int
+	retrievers     []retriever.Retriever
+	retrieverMap   map[string]retriever.Retriever
+	rrfK           int
+	fusionStrategy fusion.Strategy
 }
 
 // NewProvider creates a new retrieval provider
 func NewProvider(retrievers []retriever.Retriever, retrieverMap map[string]retriever.Retriever, rrfK int) Provider {
 	return &defaultProvider{
-		retrievers:   retrievers,
-		retrieverMap: retrieverMap,
-		rrfK:         rrfK,
+		retrievers:     retrievers,
+		retrieverMap:   retrieverMap,
+		rrfK:           rrfK,
+		fusionStrategy: fusion.NewRRFStrategy(rrfK), // Default to RRF
+	}
+}
+
+// SetFusionStrategy sets the fusion strategy
+func (p *defaultProvider) SetFusionStrategy(strategy fusion.Strategy) {
+	if strategy != nil {
+		p.fusionStrategy = strategy
 	}
 }
 
@@ -195,16 +205,18 @@ func (p *defaultProvider) parallelRetrieve(
 	return allDocs
 }
 
-// fuse merges results using RRF fusion
+// fuse merges results using configured fusion strategy
 func (p *defaultProvider) fuse(results []schema.SearchResult, profile config.RetrievalProfile, m *metrics.RetrievalMetrics) []schema.SearchResult {
 	if len(results) == 0 {
 		return results
 	}
 
-	// Use RRF fusion
+	start := time.Now()
+
+	// Use configured fusion strategy
 	// Group all results into a single list (simple approach for single query set)
 	resultLists := [][]schema.SearchResult{results}
-	fused := fusion.RRFScore(resultLists, p.rrfK)
+	fused := p.fusionStrategy.Fuse(resultLists)
 
 	// Apply threshold
 	if profile.Threshold > 0 {
@@ -223,8 +235,9 @@ func (p *defaultProvider) fuse(results []schema.SearchResult, profile config.Ret
 	}
 
 	if m != nil {
-		m.FusionMethod = "rrf"
+		m.FusionMethod = p.fusionStrategy.Name()
 		m.FusionResultCount = len(fused)
+		m.FusionLatencyMs = time.Since(start).Milliseconds()
 	}
 
 	return fused
