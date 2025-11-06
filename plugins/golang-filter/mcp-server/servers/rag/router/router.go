@@ -14,13 +14,21 @@ import (
 
 // RoutingDecision represents the routing decision for a query
 type RoutingDecision struct {
-	NeedWeb       bool    `json:"need_web"`
-	NeedVector    bool    `json:"need_vector"`
-	NeedBM25      bool    `json:"need_bm25"`
-	QueryType     string  `json:"query_type"`     // factoid/comparison/temporal/open-ended
-	Confidence    float64 `json:"confidence"`     // Confidence score [0, 1]
-	Reason        string  `json:"reason"`         // Human-readable reason
-	SuggestedTopK int     `json:"suggested_topk"` // Suggested TopK for this query
+	NeedWeb        bool                     `json:"need_web"`
+	NeedVector     bool                     `json:"need_vector"`
+	NeedBM25       bool                     `json:"need_bm25"`
+	QueryType      string                   `json:"query_type"`     // factoid/comparison/temporal/open-ended
+	Confidence     float64                  `json:"confidence"`     // Confidence score [0, 1]
+	Reason         string                   `json:"reason"`         // Human-readable reason
+	SuggestedTopK  int                      `json:"suggested_topk"` // Suggested TopK for this query
+	ProfileName    string                   `json:"profile_name,omitempty"`
+	VariantBudgets map[string]VariantBudget `json:"variant_budgets,omitempty"`
+}
+
+// VariantBudget defines per-variant routing budgets.
+type VariantBudget struct {
+	Enable bool `json:"enable"`
+	TopK   int  `json:"top_k"`
 }
 
 // Router determines which retrievers to use for a given query
@@ -32,13 +40,19 @@ type Router interface {
 type HTTPRouter struct {
 	Endpoint string
 	Client   *httpx.Client
+	rules    []config.RouterRule
 }
 
 // NewHTTPRouter creates a new HTTP-based router
-func NewHTTPRouter(endpoint string) *HTTPRouter {
+func NewHTTPRouter(endpoint string, routerCfg *config.RouterConfig, httpCfg *config.HTTPClientConfig) *HTTPRouter {
+	var rules []config.RouterRule
+	if routerCfg != nil {
+		rules = routerCfg.Rules
+	}
 	return &HTTPRouter{
 		Endpoint: endpoint,
-		Client:   httpx.NewFromConfig(nil),
+		Client:   httpx.NewFromConfig(httpCfg),
+		rules:    rules,
 	}
 }
 
@@ -83,17 +97,19 @@ func (r *HTTPRouter) Route(ctx context.Context, query string) (*RoutingDecision,
 
 // fallbackRuleBased provides rule-based routing as fallback
 func (r *HTTPRouter) fallbackRuleBased(query string) *RoutingDecision {
-	rb := &RuleBasedRouter{}
+	rb := NewRuleBasedRouter(r.rules)
 	decision, _ := rb.Route(context.Background(), query)
 	return decision
 }
 
 // RuleBasedRouter implements simple rule-based routing
-type RuleBasedRouter struct{}
+type RuleBasedRouter struct {
+	rules []config.RouterRule
+}
 
 // NewRuleBasedRouter creates a new rule-based router
-func NewRuleBasedRouter() *RuleBasedRouter {
-	return &RuleBasedRouter{}
+func NewRuleBasedRouter(rules []config.RouterRule) *RuleBasedRouter {
+	return &RuleBasedRouter{rules: rules}
 }
 
 // Route applies rule-based logic to determine routing
@@ -177,9 +193,104 @@ func (r *RuleBasedRouter) Route(ctx context.Context, query string) (*RoutingDeci
 		}
 	}
 
+	r.applyRules(decision)
+
 	api.LogInfof("router: rule-based decision - web=%v vector=%v bm25=%v type=%s reason=%s",
 		decision.NeedWeb, decision.NeedVector, decision.NeedBM25, decision.QueryType, decision.Reason)
 	return decision, nil
+}
+
+func (r *RuleBasedRouter) applyRules(decision *RoutingDecision) {
+	if decision == nil || len(r.rules) == 0 {
+		return
+	}
+	for _, rule := range r.rules {
+		if rule.Intent != "" && !strings.EqualFold(rule.Intent, decision.QueryType) {
+			continue
+		}
+		if rule.Profile != "" {
+			decision.ProfileName = rule.Profile
+		} else if rule.Intent != "" {
+			decision.ProfileName = rule.Intent
+		}
+		if budgets := buildVariantBudgets(rule); len(budgets) > 0 {
+			decision.VariantBudgets = budgets
+			for variant, budget := range budgets {
+				if !budget.Enable {
+					continue
+				}
+				switch variant {
+				case "dense":
+					decision.NeedVector = true
+				case "sparse":
+					decision.NeedBM25 = true
+				case "web":
+					decision.NeedWeb = true
+				case "hyde":
+					// HYDE signals downstream seed generation; no direct retriever toggle.
+				}
+			}
+		}
+		return
+	}
+}
+
+func buildVariantBudgets(rule config.RouterRule) map[string]VariantBudget {
+	enabled := make(map[string]bool)
+	for _, variant := range rule.Enable {
+		key := normalizeVariant(variant)
+		if key != "" {
+			enabled[key] = true
+		}
+	}
+	if len(enabled) == 0 && len(rule.Budgets) == 0 {
+		return nil
+	}
+
+	budgets := make(map[string]VariantBudget)
+	for variant, topk := range rule.Budgets {
+		key := normalizeVariant(variant)
+		if key == "" {
+			continue
+		}
+		budget := VariantBudget{
+			Enable: enabled[key] || len(enabled) == 0,
+			TopK:   topk,
+		}
+		budgets[key] = budget
+	}
+
+	for variant, on := range enabled {
+		if !on {
+			continue
+		}
+		if _, exists := budgets[variant]; !exists {
+			budgets[variant] = VariantBudget{Enable: true}
+		} else {
+			b := budgets[variant]
+			b.Enable = true
+			budgets[variant] = b
+		}
+	}
+
+	if len(budgets) == 0 {
+		return nil
+	}
+	return budgets
+}
+
+func normalizeVariant(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+func containsRetriever(retrievers []string, typ string) bool {
+	typLower := strings.ToLower(strings.TrimSpace(typ))
+	for _, r := range retrievers {
+		if strings.Contains(strings.ToLower(r), typLower) {
+			return true
+		}
+	}
+	return false
 }
 
 // HybridRouter combines HTTP router with rule-based fallback
@@ -191,7 +302,7 @@ type HybridRouter struct {
 // NewHybridRouter creates a hybrid router
 func NewHybridRouter(primary, fallback Router) *HybridRouter {
 	if fallback == nil {
-		fallback = NewRuleBasedRouter()
+		fallback = NewRuleBasedRouter(nil)
 	}
 	return &HybridRouter{
 		Primary:  primary,
@@ -252,31 +363,74 @@ func ApplyDecision(decision *RoutingDecision, profile config.RetrievalProfile) c
 		profile.TopK = decision.SuggestedTopK
 	}
 
+	if len(decision.VariantBudgets) > 0 {
+		if profile.VariantBudgets == nil {
+			profile.VariantBudgets = make(map[string]int, len(decision.VariantBudgets))
+		} else {
+			for k := range profile.VariantBudgets {
+				delete(profile.VariantBudgets, k)
+			}
+		}
+		for variant, budget := range decision.VariantBudgets {
+			variantKey := normalizeVariant(variant)
+			if !budget.Enable {
+				continue
+			}
+			if budget.TopK > 0 {
+				profile.VariantBudgets[variantKey] = budget.TopK
+			} else {
+				profile.VariantBudgets[variantKey] = 0
+			}
+			switch variantKey {
+			case "dense":
+				if !containsRetriever(profile.Retrievers, "vector") {
+					profile.Retrievers = append(profile.Retrievers, "vector")
+				}
+				if topk := budget.TopK; topk > 0 && (profile.PerRetrieverTopK == 0 || topk < profile.PerRetrieverTopK) {
+					profile.PerRetrieverTopK = topk
+				}
+			case "sparse":
+				if !containsRetriever(profile.Retrievers, "bm25") {
+					profile.Retrievers = append(profile.Retrievers, "bm25")
+				}
+			case "hyde":
+				profile.HYDE.Enable = true
+				if budget.TopK > 0 {
+					profile.HYDE.MaxSeeds = budget.TopK
+				}
+			case "web":
+				profile.UseWeb = true
+				if !containsRetriever(profile.Retrievers, "web") {
+					profile.Retrievers = append(profile.Retrievers, "web")
+				}
+			}
+		}
+	}
+
 	return profile
 }
 
 // NewRouter creates a router based on configuration
-func NewRouter(cfg *config.RouterConfig) Router {
+func NewRouter(cfg *config.RouterConfig, httpCfg *config.HTTPClientConfig) Router {
 	if cfg == nil {
-		return NewRuleBasedRouter()
+		return NewRuleBasedRouter(nil)
 	}
 
 	switch cfg.Provider {
 	case "http":
 		if cfg.Endpoint != "" {
-			return NewHTTPRouter(cfg.Endpoint)
+			return NewHTTPRouter(cfg.Endpoint, cfg, httpCfg)
 		}
-		return NewRuleBasedRouter()
+		return NewRuleBasedRouter(cfg.Rules)
 	case "rule":
-		return NewRuleBasedRouter()
+		return NewRuleBasedRouter(cfg.Rules)
 	case "hybrid":
 		var primary Router
 		if cfg.Endpoint != "" {
-			primary = NewHTTPRouter(cfg.Endpoint)
+			primary = NewHTTPRouter(cfg.Endpoint, cfg, httpCfg)
 		}
-		return NewHybridRouter(primary, NewRuleBasedRouter())
+		return NewHybridRouter(primary, NewRuleBasedRouter(cfg.Rules))
 	default:
-		return NewRuleBasedRouter()
+		return NewRuleBasedRouter(cfg.Rules)
 	}
 }
-

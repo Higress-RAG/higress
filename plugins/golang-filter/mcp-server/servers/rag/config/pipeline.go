@@ -31,6 +31,10 @@ type PipelineConfig struct {
 	Session *SessionConfig `json:"session,omitempty" yaml:"session,omitempty"`
 	// HTTP global defaults for outbound calls (retrievers, reranker, evaluator, web search).
 	HTTP *HTTPClientConfig `json:"http,omitempty" yaml:"http,omitempty"`
+	// Feedback config for adaptive retrieval.
+	Feedback *FeedbackConfig `json:"feedback,omitempty" yaml:"feedback,omitempty"`
+	// Cache controls L1 caching of retrieval results.
+	Cache *CacheConfig `json:"cache,omitempty" yaml:"cache,omitempty"`
 }
 
 type PreConfig struct {
@@ -66,12 +70,13 @@ type RetrieverConfig struct {
 
 // RetrievalProfile describes a strategy for a specific intent or query class.
 type RetrievalProfile struct {
-	Name       string   `json:"name" yaml:"name"`
-	Intent     string   `json:"intent,omitempty" yaml:"intent,omitempty"`
-	Retrievers []string `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
-	TopK       int      `json:"top_k,omitempty" yaml:"top_k,omitempty"`
-	Threshold  float64  `json:"threshold,omitempty" yaml:"threshold,omitempty"`
-	UseWeb     bool     `json:"use_web,omitempty" yaml:"use_web,omitempty"`
+	Name            string   `json:"name" yaml:"name"`
+	Intent          string   `json:"intent,omitempty" yaml:"intent,omitempty"`
+	Retrievers      []string `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
+	TopK            int      `json:"top_k,omitempty" yaml:"top_k,omitempty"`
+	Threshold       float64  `json:"threshold,omitempty" yaml:"threshold,omitempty"`
+	UseWeb          bool     `json:"use_web,omitempty" yaml:"use_web,omitempty"`
+	LatencyBudgetMs int      `json:"latency_budget_ms,omitempty" yaml:"latency_budget_ms,omitempty"`
 	// MaxFanout caps concurrent retriever fan-out for this profile (0 => no cap)
 	MaxFanout int `json:"max_fanout,omitempty" yaml:"max_fanout,omitempty"`
 	// VectorGate: if vector Top1 score >= this threshold, skip web retriever
@@ -81,7 +86,62 @@ type RetrievalProfile struct {
 	// ForceWebOnLow: when true and vector Top1 < VectorLowGate, ensure web retriever is used
 	ForceWebOnLow bool `json:"force_web_on_low,omitempty" yaml:"force_web_on_low,omitempty"`
 	// PerRetrieverTopK: cap TopK per retriever; 0 => use TopK
-	PerRetrieverTopK int `json:"per_retriever_top_k,omitempty" yaml:"per_retriever_top_k,omitempty"`
+	PerRetrieverTopK int            `json:"per_retriever_top_k,omitempty" yaml:"per_retriever_top_k,omitempty"`
+	Cascade          CascadeConfig  `json:"cascade,omitempty" yaml:"cascade,omitempty"`
+	HYDE             HYDEConfig     `json:"hyde,omitempty" yaml:"hyde,omitempty"`
+	VariantBudgets   map[string]int `json:"variant_budgets,omitempty" yaml:"variant_budgets,omitempty"`
+}
+
+type CascadeConfig struct {
+	Enable          bool               `json:"enable,omitempty" yaml:"enable,omitempty"`
+	LatencyBudgetMs int                `json:"latency_budget_ms,omitempty" yaml:"latency_budget_ms,omitempty"`
+	Stage1          CascadeStageConfig `json:"stage1,omitempty" yaml:"stage1,omitempty"`
+	Stage2          CascadeStageConfig `json:"stage2,omitempty" yaml:"stage2,omitempty"`
+}
+
+type CascadeStageConfig struct {
+	Retriever string `json:"retriever,omitempty" yaml:"retriever,omitempty"`
+	TopK      int    `json:"top_k,omitempty" yaml:"top_k,omitempty"`
+	Mode      string `json:"mode,omitempty" yaml:"mode,omitempty"`
+}
+
+type HYDEConfig struct {
+	Enable    bool   `json:"enable,omitempty" yaml:"enable,omitempty"`
+	Provider  string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	MaxSeeds  int    `json:"max_seeds,omitempty" yaml:"max_seeds,omitempty"`
+	TimeoutMs int    `json:"timeout_ms,omitempty" yaml:"timeout_ms,omitempty"`
+}
+
+type FeedbackConfig struct {
+	Window      int                 `json:"window,omitempty" yaml:"window,omitempty"`
+	Thresholds  FeedbackThresholds  `json:"thresholds,omitempty" yaml:"thresholds,omitempty"`
+	Adjustments FeedbackAdjustments `json:"adjustments,omitempty" yaml:"adjustments,omitempty"`
+	CooldownSec int                 `json:"cooldown_seconds,omitempty" yaml:"cooldown_seconds,omitempty"`
+}
+
+type FeedbackThresholds struct {
+	Incorrect int `json:"incorrect,omitempty" yaml:"incorrect,omitempty"`
+	Ambiguous int `json:"ambiguous,omitempty" yaml:"ambiguous,omitempty"`
+	Confident int `json:"confident,omitempty" yaml:"confident,omitempty"`
+}
+
+type FeedbackAdjustments struct {
+	TopKStep            int  `json:"topk_step,omitempty" yaml:"topk_step,omitempty"`
+	TopKMax             int  `json:"topk_max,omitempty" yaml:"topk_max,omitempty"`
+	EnableForceWebOnLow bool `json:"enable_force_web_on_low,omitempty" yaml:"enable_force_web_on_low,omitempty"`
+}
+
+type CacheConfig struct {
+	L1 *CacheLayerConfig `json:"l1,omitempty" yaml:"l1,omitempty"`
+}
+
+type CacheLayerConfig struct {
+	Enable     bool   `json:"enable,omitempty" yaml:"enable,omitempty"`
+	MaxEntries int    `json:"max_entries,omitempty" yaml:"max_entries,omitempty"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty" yaml:"ttl_seconds,omitempty"`
+	Store      string `json:"store,omitempty" yaml:"store,omitempty"`
+	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty"`
 }
 
 type PostConfig struct {
@@ -138,6 +198,18 @@ type FusionConfig struct {
 	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
 	// Params: strategy-specific parameters (e.g., weights, k value)
 	Params map[string]interface{} `json:"params,omitempty" yaml:"params,omitempty"`
+	// EnableLearned toggles the learned fusion strategy rollout.
+	EnableLearned bool `json:"enable_learned,omitempty" yaml:"enable_learned,omitempty"`
+	// Fallback defines the fallback strategy name for learned fusion.
+	Fallback string `json:"fallback,omitempty" yaml:"fallback,omitempty"`
+	// WeightsURI is the location of the learned weights document.
+	WeightsURI string `json:"weights_uri,omitempty" yaml:"weights_uri,omitempty"`
+	// TimeoutMs caps learned fusion weight loading latency.
+	TimeoutMs int `json:"timeout_ms,omitempty" yaml:"timeout_ms,omitempty"`
+	// TrafficPercent controls the traffic percentage for learned fusion rollout.
+	TrafficPercent int `json:"traffic_percent,omitempty" yaml:"traffic_percent,omitempty"`
+	// RefreshSeconds overrides the default weight cache TTL.
+	RefreshSeconds int `json:"refresh_seconds,omitempty" yaml:"refresh_seconds,omitempty"`
 }
 
 // RouterConfig defines the query routing configuration
@@ -148,6 +220,15 @@ type RouterConfig struct {
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
 	// Enable: whether to enable query routing
 	Enable bool `json:"enable,omitempty" yaml:"enable,omitempty"`
+	// Rules define intent/variant routing overrides.
+	Rules []RouterRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+}
+
+type RouterRule struct {
+	Intent  string         `json:"intent,omitempty" yaml:"intent,omitempty"`
+	Profile string         `json:"profile,omitempty" yaml:"profile,omitempty"`
+	Enable  []string       `json:"enable,omitempty" yaml:"enable,omitempty"`
+	Budgets map[string]int `json:"budgets,omitempty" yaml:"budgets,omitempty"`
 }
 
 // DefaultPipeline returns a safe default pipeline configuration.

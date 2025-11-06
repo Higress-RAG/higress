@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/feedback"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/metrics"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
@@ -16,17 +17,28 @@ import (
 type Provider interface {
 	Evaluate(ctx context.Context, query string, profile config.RetrievalProfile, m *metrics.RetrievalMetrics) Decision
 	ApplyDecision(decision Decision, profile config.RetrievalProfile) config.RetrievalProfile
+	WithFeedback(manager *feedback.Manager, cfg *config.FeedbackConfig)
 }
 
 // defaultProvider is the default implementation
 type defaultProvider struct {
 	vectorRetriever retriever.Retriever
+	feedbackMgr     *feedback.Manager
+	feedbackCfg     config.FeedbackConfig
 }
 
 // NewProvider creates a new gating provider
 func NewProvider(vectorRetriever retriever.Retriever) Provider {
 	return &defaultProvider{
 		vectorRetriever: vectorRetriever,
+	}
+}
+
+// WithFeedback wires feedback manager for adaptive adjustments.
+func (p *defaultProvider) WithFeedback(manager *feedback.Manager, cfg *config.FeedbackConfig) {
+	p.feedbackMgr = manager
+	if cfg != nil {
+		p.feedbackCfg = *cfg
 	}
 }
 
@@ -122,6 +134,77 @@ func (p *defaultProvider) ApplyDecision(decision Decision, profile config.Retrie
 		if !containsRetriever(profile.Retrievers, "web") {
 			profile.Retrievers = append(profile.Retrievers, "web")
 		}
+	}
+
+	profile = p.applyFeedbackAdjustments(profile)
+
+	return profile
+}
+
+func (p *defaultProvider) applyFeedbackAdjustments(profile config.RetrievalProfile) config.RetrievalProfile {
+	if p.feedbackMgr == nil {
+		return profile
+	}
+
+	key := profile.Name
+	if key == "" {
+		key = "default"
+	}
+
+	cooldown := time.Duration(p.feedbackCfg.CooldownSec) * time.Second
+	if p.feedbackMgr.InCooldown(key, cooldown) {
+		return profile
+	}
+
+	trend := p.feedbackMgr.GetTrend(key, p.feedbackCfg.Window)
+	if trend.Total == 0 {
+		return profile
+	}
+
+	step := p.feedbackCfg.Adjustments.TopKStep
+	if step <= 0 {
+		step = 2
+	}
+
+	thresholds := p.feedbackCfg.Thresholds
+	adjusted := false
+
+	if thresholds.Incorrect > 0 && trend.ConsecutiveIncorrect >= thresholds.Incorrect {
+		profile.TopK += step
+		adjusted = true
+		api.LogInfof("gating: feedback increased TopK due to %d consecutive incorrect", trend.ConsecutiveIncorrect)
+	} else if thresholds.Ambiguous > 0 && trend.ConsecutiveAmbiguous >= thresholds.Ambiguous {
+		profile.TopK += step
+		adjusted = true
+		api.LogInfof("gating: feedback increased TopK due to %d consecutive ambiguous", trend.ConsecutiveAmbiguous)
+	} else if thresholds.Confident > 0 && trend.ConsecutiveConfident >= thresholds.Confident {
+		if profile.TopK > step {
+			profile.TopK -= step
+			if profile.TopK < 3 {
+				profile.TopK = 3
+			}
+			adjusted = true
+			api.LogInfof("gating: feedback decreased TopK after %d confident verdicts", trend.ConsecutiveConfident)
+		}
+	}
+
+	if adjusted {
+		if max := p.feedbackCfg.Adjustments.TopKMax; max > 0 && profile.TopK > max {
+			profile.TopK = max
+		}
+		if profile.TopK <= 0 {
+			profile.TopK = 1
+		}
+		if profile.PerRetrieverTopK > profile.TopK || profile.PerRetrieverTopK == 0 {
+			profile.PerRetrieverTopK = profile.TopK
+		}
+		if p.feedbackCfg.Adjustments.EnableForceWebOnLow && (trend.ConsecutiveIncorrect >= thresholds.Incorrect || trend.ConsecutiveAmbiguous >= thresholds.Ambiguous) {
+			if !containsRetriever(profile.Retrievers, "web") {
+				profile.Retrievers = append(profile.Retrievers, "web")
+			}
+			profile.UseWeb = true
+		}
+		p.feedbackMgr.MarkAdjustment(key)
 	}
 
 	return profile

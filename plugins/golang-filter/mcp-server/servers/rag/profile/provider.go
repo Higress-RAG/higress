@@ -95,6 +95,26 @@ func (p *defaultProvider) Normalize(prof config.RetrievalProfile) config.Retriev
 	if prof.PerRetrieverTopK == 0 {
 		prof.PerRetrieverTopK = prof.TopK
 	}
+	if prof.Cascade.Enable {
+		if prof.Cascade.Stage1.TopK == 0 {
+			prof.Cascade.Stage1.TopK = prof.TopK
+		}
+		if prof.Cascade.Stage2.TopK == 0 {
+			prof.Cascade.Stage2.TopK = prof.TopK
+		}
+		if prof.Cascade.Stage2.Mode == "" {
+			prof.Cascade.Stage2.Mode = "rescore"
+		}
+		if prof.Cascade.LatencyBudgetMs == 0 && prof.LatencyBudgetMs > 0 {
+			prof.Cascade.LatencyBudgetMs = prof.LatencyBudgetMs
+		}
+	}
+	if prof.HYDE.TimeoutMs == 0 {
+		prof.HYDE.TimeoutMs = 150
+	}
+	if prof.HYDE.MaxSeeds == 0 {
+		prof.HYDE.MaxSeeds = 1
+	}
 	return prof
 }
 

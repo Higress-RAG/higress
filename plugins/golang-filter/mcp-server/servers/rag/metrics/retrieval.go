@@ -34,10 +34,18 @@ type RetrievalMetrics struct {
 	FallbackTriggered bool                      `json:"fallback_triggered"`
 
 	// 融合阶段
-	FusionMethod       string `json:"fusion_method"`
-	FusionResultCount  int    `json:"fusion_result_count"`
-	FusionLatencyMs    int64  `json:"fusion_latency_ms,omitempty"`
-	DeduplicationCount int    `json:"deduplication_count,omitempty"` // 融合前去重的文档数
+	FusionStrategy       string `json:"fusion_strategy"`
+	FusionResultCount    int    `json:"fusion_result_count"`
+	FusionLatencyMs      int64  `json:"fusion_latency_ms,omitempty"`
+	DeduplicationCount   int    `json:"deduplication_count,omitempty"` // 融合前去重的文档数
+	FusionWeightsVersion string `json:"fusion_weights_version,omitempty"`
+
+	// Router 阶段
+	RouterEnabled  bool           `json:"router_enabled"`
+	RouterProvider string         `json:"router_provider,omitempty"`
+	RouterProfile  string         `json:"router_profile,omitempty"`
+	RouterVariants map[string]int `json:"router_variants,omitempty"`
+	RouterError    string         `json:"router_error,omitempty"`
 
 	// Post 阶段
 	RerankEnabled     bool  `json:"rerank_enabled"`
@@ -76,6 +84,7 @@ func NewRetrievalMetrics() *RetrievalMetrics {
 		RetrieverMetrics: make(map[string]RetrieverStats),
 		RetrievalPhases:  make([]string, 0),
 		GatingDecisions:  make([]string, 0),
+		RouterVariants:   make(map[string]int),
 	}
 }
 
@@ -140,9 +149,12 @@ func (m *RetrievalMetrics) AddSkippedRetriever(retriever string) {
 }
 
 // RecordFusion 记录融合信息
-func (m *RetrievalMetrics) RecordFusion(method string, resultCount, deduplicationCount int, latencyMs int64) {
-	m.FusionMethod = method
+func (m *RetrievalMetrics) RecordFusion(strategy string, resultCount, deduplicationCount int, latencyMs int64, weightsVersion string) {
+	m.FusionStrategy = strategy
 	m.FusionResultCount = resultCount
 	m.DeduplicationCount = deduplicationCount
 	m.FusionLatencyMs = latencyMs
+	if weightsVersion != "" {
+		m.FusionWeightsVersion = weightsVersion
+	}
 }

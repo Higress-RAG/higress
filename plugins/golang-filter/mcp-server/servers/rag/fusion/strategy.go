@@ -1,25 +1,21 @@
 package fusion
 
 import (
+	"context"
+	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
 )
 
-// Strategy defines the interface for fusion strategies
-type Strategy interface {
-	// Fuse merges multiple ranked lists into a single ranked list
-	Fuse(lists [][]schema.SearchResult) []schema.SearchResult
-	// Name returns the strategy name
-	Name() string
-}
-
-// RRFStrategy implements Reciprocal Rank Fusion
+// RRFStrategy implements Reciprocal Rank Fusion.
 type RRFStrategy struct {
-	K int // RRF parameter (default: 60)
+	K int
 }
 
-// NewRRFStrategy creates a new RRF fusion strategy
+// NewRRFStrategy creates a new RRF fusion strategy.
 func NewRRFStrategy(k int) *RRFStrategy {
 	if k <= 0 {
 		k = 60
@@ -27,22 +23,33 @@ func NewRRFStrategy(k int) *RRFStrategy {
 	return &RRFStrategy{K: k}
 }
 
-// Fuse implements RRF fusion
-func (s *RRFStrategy) Fuse(lists [][]schema.SearchResult) []schema.SearchResult {
-	return RRFScore(lists, s.K)
+// Fuse merges retriever results using reciprocal rank fusion.
+func (s *RRFStrategy) Fuse(ctx context.Context, inputs []RetrieverResult, params map[string]any) ([]schema.SearchResult, error) {
+	k := s.K
+	if v := lookupInt(params, "k"); v > 0 {
+		k = v
+	}
+
+	lists := make([][]schema.SearchResult, 0, len(inputs))
+	for _, in := range inputs {
+		if len(in.Results) == 0 {
+			continue
+		}
+		lists = append(lists, in.Results)
+	}
+
+	return RRFScore(lists, k), nil
 }
 
-// Name returns the strategy name
-func (s *RRFStrategy) Name() string {
-	return "rrf"
-}
+// Name implements Strategy.
+func (s *RRFStrategy) Name() string { return "rrf" }
 
-// WeightedStrategy implements weighted score fusion
+// WeightedStrategy implements weighted score fusion.
 type WeightedStrategy struct {
-	Weights map[string]float64 // Weights per retriever type
+	Weights map[string]float64 // weight keyed by retriever identifier
 }
 
-// NewWeightedStrategy creates a new weighted fusion strategy
+// NewWeightedStrategy creates a new weighted fusion strategy.
 func NewWeightedStrategy(weights map[string]float64) *WeightedStrategy {
 	if weights == nil {
 		weights = make(map[string]float64)
@@ -50,174 +57,192 @@ func NewWeightedStrategy(weights map[string]float64) *WeightedStrategy {
 	return &WeightedStrategy{Weights: weights}
 }
 
-// Fuse implements weighted score fusion
-func (s *WeightedStrategy) Fuse(lists [][]schema.SearchResult) []schema.SearchResult {
-	if len(lists) == 0 {
-		return []schema.SearchResult{}
+// Fuse merges retriever results using configured weights.
+func (s *WeightedStrategy) Fuse(ctx context.Context, inputs []RetrieverResult, params map[string]any) ([]schema.SearchResult, error) {
+	if len(inputs) == 0 {
+		return []schema.SearchResult{}, nil
 	}
 
-	// Accumulate weighted scores by document ID
+	weights := copyStringFloatMap(s.Weights)
+	if paramWeights, ok := parseStringFloatMap(params["weights"]); ok {
+		for k, v := range paramWeights {
+			weights[k] = v
+		}
+	}
+
 	type agg struct {
 		doc   schema.Document
 		score float64
 		count int
 	}
-	scores := map[string]*agg{}
+	scores := make(map[string]*agg, len(inputs)*8)
 
-	for listIdx, list := range lists {
-		// Get weight for this list (default 1.0 if not specified)
-		weight := 1.0
-		if len(list) > 0 {
-			// Try to get weight by retriever type if available in metadata
-			if retrieverType, ok := list[0].Document.Metadata["retriever_type"].(string); ok {
-				if w, exists := s.Weights[retrieverType]; exists {
-					weight = w
-				}
-			}
+	for idx, in := range inputs {
+		if len(in.Results) == 0 {
+			continue
 		}
-		// Fallback: use list index as identifier
-		if weight == 1.0 && len(s.Weights) > 0 {
-			if w, exists := s.Weights[string(rune(listIdx))]; exists {
+
+		weight := 1.0
+		if w, ok := weights[in.Retriever]; ok {
+			weight = w
+		} else if key := compoundKey(in.Retriever, in.Provider); key != "" {
+			if w, ok := weights[key]; ok {
 				weight = w
 			}
+		} else if w, ok := weights[indexKey(idx)]; ok {
+			weight = w
 		}
 
-		for _, item := range list {
-			id := item.Document.ID
+		for _, item := range in.Results {
+			doc := item.Document
+			if doc.Metadata == nil {
+				doc.Metadata = make(map[string]interface{})
+			}
+			doc.Metadata["retriever_type"] = in.Retriever
+			if in.Provider != "" {
+				doc.Metadata["retriever_provider"] = in.Provider
+			}
+
+			id := doc.ID
 			if id == "" {
+				// Guard against empty document IDs.
 				continue
 			}
-			if _, ok := scores[id]; !ok {
-				scores[id] = &agg{doc: item.Document, score: 0, count: 0}
+
+			entry, ok := scores[id]
+			if !ok {
+				entry = &agg{doc: doc}
+				scores[id] = entry
 			}
-			scores[id].score += item.Score * weight
-			scores[id].count++
+			entry.score += item.Score * weight
+			entry.count++
 		}
 	}
 
-	// Normalize scores by count (average)
 	out := make([]schema.SearchResult, 0, len(scores))
 	for _, v := range scores {
-		avgScore := v.score / float64(v.count)
-		out = append(out, schema.SearchResult{Document: v.doc, Score: avgScore})
+		score := v.score
+		if v.count > 0 {
+			score = score / float64(v.count)
+		}
+		out = append(out, schema.SearchResult{
+			Document: v.doc,
+			Score:    score,
+		})
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	return out
+	return out, nil
 }
 
-// Name returns the strategy name
-func (s *WeightedStrategy) Name() string {
-	return "weighted"
-}
+// Name implements Strategy.
+func (s *WeightedStrategy) Name() string { return "weighted" }
 
-// LinearCombinationStrategy implements linear combination of scores
+// LinearCombinationStrategy merges scores with a fixed weight vector.
 type LinearCombinationStrategy struct {
-	Weights []float64 // Weights for each list (in order)
+	Weights []float64
 }
 
-// NewLinearCombinationStrategy creates a new linear combination strategy
+// NewLinearCombinationStrategy creates a new linear strategy.
 func NewLinearCombinationStrategy(weights []float64) *LinearCombinationStrategy {
-	if weights == nil || len(weights) == 0 {
-		weights = []float64{1.0} // Default equal weight
+	if len(weights) == 0 {
+		weights = []float64{1.0}
 	}
 	return &LinearCombinationStrategy{Weights: weights}
 }
 
-// Fuse implements linear combination fusion
-func (s *LinearCombinationStrategy) Fuse(lists [][]schema.SearchResult) []schema.SearchResult {
-	if len(lists) == 0 {
-		return []schema.SearchResult{}
+// Fuse merges inputs using linear combination (by input index).
+func (s *LinearCombinationStrategy) Fuse(ctx context.Context, inputs []RetrieverResult, params map[string]any) ([]schema.SearchResult, error) {
+	if len(inputs) == 0 {
+		return []schema.SearchResult{}, nil
 	}
 
-	// Normalize weights
-	totalWeight := 0.0
-	for _, w := range s.Weights {
-		totalWeight += w
-	}
-	normalizedWeights := make([]float64, len(s.Weights))
-	for i, w := range s.Weights {
-		normalizedWeights[i] = w / totalWeight
+	weights := copyFloatSlice(s.Weights)
+	if override, ok := parseFloatSlice(params["weights"]); ok && len(override) > 0 {
+		weights = override
 	}
 
-	// Accumulate weighted scores by document ID
+	total := 0.0
+	for _, w := range weights {
+		total += w
+	}
+	if total == 0 {
+		total = 1
+	}
+
 	type agg struct {
-		doc         schema.Document
-		score       float64
-		listPresent map[int]bool
+		doc   schema.Document
+		score float64
 	}
-	scores := map[string]*agg{}
+	scores := make(map[string]*agg, len(inputs)*8)
 
-	for listIdx, list := range lists {
-		weight := 1.0
-		if listIdx < len(normalizedWeights) {
-			weight = normalizedWeights[listIdx]
+	for idx, in := range inputs {
+		if len(in.Results) == 0 {
+			continue
 		}
+		weight := 1.0
+		if idx < len(weights) {
+			weight = weights[idx]
+		}
+		weight = weight / total
 
-		for _, item := range list {
-			id := item.Document.ID
+		for _, item := range in.Results {
+			doc := item.Document
+			if doc.Metadata == nil {
+				doc.Metadata = make(map[string]interface{})
+			}
+			doc.Metadata["retriever_type"] = in.Retriever
+			id := doc.ID
 			if id == "" {
 				continue
 			}
-			if _, ok := scores[id]; !ok {
-				scores[id] = &agg{
-					doc:         item.Document,
-					score:       0,
-					listPresent: make(map[int]bool),
-				}
+			entry, ok := scores[id]
+			if !ok {
+				entry = &agg{doc: doc}
+				scores[id] = entry
 			}
-			scores[id].score += item.Score * weight
-			scores[id].listPresent[listIdx] = true
+			entry.score += item.Score * weight
 		}
 	}
 
-	// Convert to result list
 	out := make([]schema.SearchResult, 0, len(scores))
 	for _, v := range scores {
 		out = append(out, schema.SearchResult{Document: v.doc, Score: v.score})
 	}
-
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	return out
+	return out, nil
 }
 
-// Name returns the strategy name
-func (s *LinearCombinationStrategy) Name() string {
-	return "linear"
-}
+// Name implements Strategy.
+func (s *LinearCombinationStrategy) Name() string { return "linear" }
 
-// DistributionBasedStrategy implements a score normalization before fusion
-// Normalizes each list's scores to [0,1] range before combining
+// DistributionBasedStrategy normalizes individual result lists before delegating to a base strategy.
 type DistributionBasedStrategy struct {
-	BaseStrategy Strategy // Wrapped strategy to use after normalization
+	Base Strategy
 }
 
-// NewDistributionBasedStrategy creates a new distribution-based strategy
+// NewDistributionBasedStrategy wraps another strategy with score normalization.
 func NewDistributionBasedStrategy(base Strategy) *DistributionBasedStrategy {
 	if base == nil {
 		base = NewRRFStrategy(60)
 	}
-	return &DistributionBasedStrategy{BaseStrategy: base}
+	return &DistributionBasedStrategy{Base: base}
 }
 
-// Fuse implements distribution-based fusion with normalization
-func (s *DistributionBasedStrategy) Fuse(lists [][]schema.SearchResult) []schema.SearchResult {
-	if len(lists) == 0 {
-		return []schema.SearchResult{}
+// Fuse normalizes scores per input then forwards to the base strategy.
+func (s *DistributionBasedStrategy) Fuse(ctx context.Context, inputs []RetrieverResult, params map[string]any) ([]schema.SearchResult, error) {
+	if len(inputs) == 0 {
+		return []schema.SearchResult{}, nil
 	}
 
-	// Normalize each list's scores to [0, 1]
-	normalizedLists := make([][]schema.SearchResult, len(lists))
-	for i, list := range lists {
-		if len(list) == 0 {
-			normalizedLists[i] = list
+	normalized := make([]RetrieverResult, 0, len(inputs))
+	for _, in := range inputs {
+		if len(in.Results) == 0 {
 			continue
 		}
-
-		// Find min and max scores
-		minScore := list[0].Score
-		maxScore := list[0].Score
-		for _, item := range list {
+		minScore := in.Results[0].Score
+		maxScore := in.Results[0].Score
+		for _, item := range in.Results {
 			if item.Score < minScore {
 				minScore = item.Score
 			}
@@ -225,62 +250,168 @@ func (s *DistributionBasedStrategy) Fuse(lists [][]schema.SearchResult) []schema
 				maxScore = item.Score
 			}
 		}
-
-		// Normalize scores
-		normalizedList := make([]schema.SearchResult, len(list))
-		scoreRange := maxScore - minScore
-		for j, item := range list {
-			normalized := item
-			if scoreRange > 0 {
-				normalized.Score = (item.Score - minScore) / scoreRange
+		rng := maxScore - minScore
+		norm := make([]schema.SearchResult, len(in.Results))
+		for idx, item := range in.Results {
+			copyItem := item
+			if rng > 0 {
+				copyItem.Score = (item.Score - minScore) / rng
 			} else {
-				normalized.Score = 1.0 // All scores are the same
+				copyItem.Score = 1.0
 			}
-			normalizedList[j] = normalized
+			norm[idx] = copyItem
 		}
-		normalizedLists[i] = normalizedList
+		normalized = append(normalized, RetrieverResult{
+			Query:      in.Query,
+			Retriever:  in.Retriever,
+			Provider:   in.Provider,
+			Results:    norm,
+			Attributes: in.Attributes,
+		})
 	}
 
-	// Apply base strategy on normalized lists
-	return s.BaseStrategy.Fuse(normalizedLists)
+	base := s.Base
+	if base == nil {
+		base = NewRRFStrategy(60)
+	}
+	return base.Fuse(ctx, normalized, params)
 }
 
-// Name returns the strategy name
+// Name implements Strategy.
 func (s *DistributionBasedStrategy) Name() string {
-	return "distribution_based_" + s.BaseStrategy.Name()
+	if s.Base == nil {
+		return "distribution_rrf"
+	}
+	return "distribution_" + s.Base.Name()
 }
 
-// NewStrategy creates a fusion strategy by name
-func NewStrategy(name string, params map[string]interface{}) Strategy {
-	switch name {
-	case "rrf":
-		k := 60
-		if kVal, ok := params["k"].(int); ok {
-			k = kVal
+// Helper functions -----------------------------------------------------------
+
+func lookupInt(params map[string]any, key string) int {
+	if params == nil {
+		return 0
+	}
+	switch v := params[key].(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	case string:
+		if v == "" {
+			return 0
 		}
-		return NewRRFStrategy(k)
-	case "weighted":
-		weights := make(map[string]float64)
-		if w, ok := params["weights"].(map[string]float64); ok {
-			weights = w
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
-		return NewWeightedStrategy(weights)
-	case "linear":
-		var weights []float64
-		if w, ok := params["weights"].([]float64); ok {
-			weights = w
+	}
+	return 0
+}
+
+func parseStringFloatMap(v interface{}) (map[string]float64, bool) {
+	if v == nil {
+		return nil, false
+	}
+	result := make(map[string]float64)
+	switch typed := v.(type) {
+	case map[string]float64:
+		for k, val := range typed {
+			result[k] = val
 		}
-		return NewLinearCombinationStrategy(weights)
-	case "distribution":
-		// Distribution-based with default RRF
-		var base Strategy = NewRRFStrategy(60)
-		if baseName, ok := params["base"].(string); ok {
-			base = NewStrategy(baseName, params)
+	case map[string]interface{}:
+		for k, val := range typed {
+			switch num := val.(type) {
+			case float64:
+				result[k] = num
+			case float32:
+				result[k] = float64(num)
+			case int:
+				result[k] = float64(num)
+			case int64:
+				result[k] = float64(num)
+			case string:
+				if parsed, err := strconv.ParseFloat(num, 64); err == nil {
+					result[k] = parsed
+				}
+			}
 		}
-		return NewDistributionBasedStrategy(base)
 	default:
-		// Default to RRF
-		return NewRRFStrategy(60)
+		return nil, false
+	}
+	return result, true
+}
+
+func parseFloatSlice(v interface{}) ([]float64, bool) {
+	if v == nil {
+		return nil, false
+	}
+	switch typed := v.(type) {
+	case []float64:
+		out := make([]float64, len(typed))
+		copy(out, typed)
+		return out, true
+	case []interface{}:
+		out := make([]float64, 0, len(typed))
+		for _, item := range typed {
+			switch num := item.(type) {
+			case float64:
+				out = append(out, num)
+			case float32:
+				out = append(out, float64(num))
+			case int:
+				out = append(out, float64(num))
+			case int64:
+				out = append(out, float64(num))
+			case string:
+				if parsed, err := strconv.ParseFloat(num, 64); err == nil {
+					out = append(out, parsed)
+				}
+			}
+		}
+		return out, true
+	default:
+		return nil, false
 	}
 }
 
+func copyStringFloatMap(src map[string]float64) map[string]float64 {
+	if len(src) == 0 {
+		return make(map[string]float64)
+	}
+	dst := make(map[string]float64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func copyFloatSlice(src []float64) []float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]float64, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func compoundKey(parts ...string) string {
+	buf := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			buf = append(buf, part)
+		}
+	}
+	if len(buf) == 0 {
+		return ""
+	}
+	return strings.Join(buf, ":")
+}
+
+func indexKey(idx int) string {
+	return fmt.Sprintf("list_%d", idx)
+}
