@@ -1,0 +1,175 @@
+# CRAG Configuration Example
+# This file shows how to configure Corrective Retrieval-Augmented Generation (CRAG)
+
+# Enable the enhanced RAG pipeline with CRAG
+pipeline:
+  # Enable CRAG evaluation and correction
+  enable_crag: true
+  
+  # Enable other pipeline stages
+  enable_pre: false      # Query pre-processing (classification, rewriting, decomposition)
+  enable_hybrid: true    # Hybrid retrieval (multi-source)
+  enable_post: true      # Post-processing (reranking, compression)
+  
+  # RRF (Reciprocal Rank Fusion) parameter for hybrid retrieval
+  rrf_k: 60
+  
+  # CRAG Configuration
+  crag:
+    evaluator:
+      # Evaluator type: "llm" (LLM-based) or "http" (external HTTP service)
+      provider: llm
+      
+      # Thresholds for verdict determination
+      correct: 0.7      # Score >= 0.7 → VerdictCorrect (high relevance)
+      incorrect: 0.3    # Score < 0.3 → VerdictIncorrect (low relevance)
+                        # 0.3 <= score < 0.7 → VerdictAmbiguous (medium relevance)
+      
+      # (Optional) HTTP evaluator endpoint
+      # endpoint: "http://localhost:8080/evaluate"
+    
+    # Fail mode: "open" (default, keep results on error) or "closed" (return error)
+    fail_mode: open
+    
+    # Strict mode: require evaluator or allow fallback
+    strict: false
+    
+    # Maximum iterations for iterative refinement (optional, not yet implemented)
+    max_iters: 1
+  
+  # Retriever configurations (including web search for CRAG)
+  retrievers:
+    # Web search retriever for CRAG IncorrectAction and AmbiguousAction
+    - type: web
+      provider: duckduckgo  # "duckduckgo" (default) or "bing"
+      params:
+        # DuckDuckGo doesn't require API key or endpoint
+        # For Bing, uncomment the following:
+        # endpoint: "https://api.bing.microsoft.com/v7.0/search"
+        # api_key: "your-bing-api-key"
+  
+  # Post-processing configuration
+  post:
+    # Reranking
+    rerank:
+      enable: true
+      provider: http
+      endpoint: "http://localhost:8081/rerank"
+      top_n: 5
+    
+    # Context compression
+    compress:
+      enable: false
+      method: truncate
+      target_ratio: 0.7
+  
+  # Session management (optional)
+  session:
+    store: inmemory  # "inmemory" or "redis"
+    ttl_seconds: 3600
+    # redis:
+    #   address: "localhost:6379"
+    #   db: 0
+  
+  # HTTP client defaults
+  http:
+    timeout_ms: 1200
+    retry: 1
+    backoff_min_ms: 100
+    backoff_max_ms: 800
+    max_consecutive_failures: 5
+    circuit_open_seconds: 5
+    host_allowlist:
+      - "api.duckduckgo.com"
+      - "api.bing.microsoft.com"
+      - "localhost"
+
+# LLM Configuration (required for LLM-based evaluator and query rewriter)
+llm:
+  provider: openai
+  api_key: your-openai-api-key
+  base_url: ""          # Optional: custom API endpoint
+  model: gpt-4o         # gpt-4o, gpt-3.5-turbo, etc.
+  temperature: 0.3      # Low temperature for more deterministic evaluation
+  max_tokens: 2048
+
+# Embedding Configuration
+embedding:
+  provider: openai
+  api_key: your-openai-api-key
+  model: text-embedding-3-small
+  dimensions: 1536
+
+# Vector Database Configuration
+vectordb:
+  provider: milvus      # or other supported providers
+  host: localhost
+  port: 19530
+  database: rag_db
+  collection: documents
+  username: ""
+  password: ""
+
+# Basic RAG Configuration
+rag:
+  splitter:
+    provider: recursive
+    chunk_size: 500
+    chunk_overlap: 50
+  threshold: 0.5
+  top_k: 10
+
+---
+# Alternative: HTTP-based Evaluator Configuration
+# If you have an external evaluation service
+
+pipeline:
+  enable_crag: true
+  
+  crag:
+    evaluator:
+      provider: http
+      endpoint: "http://localhost:8080/evaluate"
+      correct: 0.7
+      incorrect: 0.3
+    
+    fail_mode: open
+    strict: true  # Require HTTP evaluator to be available
+
+# Your HTTP evaluator should accept POST requests with:
+# {
+#   "query": "user query",
+#   "context": "retrieved documents"
+# }
+#
+# And return:
+# {
+#   "score": 0.85,
+#   "verdict": "correct"  // "correct", "incorrect", or "ambiguous"
+# }
+
+---
+# Minimal Configuration for Testing
+
+pipeline:
+  enable_crag: true
+  
+  crag:
+    evaluator:
+      provider: llm
+      correct: 0.7
+      incorrect: 0.3
+    fail_mode: open
+
+llm:
+  provider: openai
+  api_key: your-openai-api-key
+  model: gpt-3.5-turbo
+  temperature: 0
+
+# This minimal config will:
+# - Use LLM to evaluate document relevance
+# - Not perform web search (no web retriever configured)
+# - IncorrectAction will return empty results
+# - AmbiguousAction will just use internal documents
+

@@ -12,6 +12,7 @@ import (
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/post"
+	pre_retrieve "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/pre-retrieve"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/textsplitter"
@@ -83,20 +84,112 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 		}
 		var rr post.Reranker
 		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Rerank.Enable {
-			rr = post.NewHTTPReranker(ragclient.config.Pipeline.Post.Rerank.Endpoint)
+			rerankCfg := ragclient.config.Pipeline.Post.Rerank
+			switch rerankCfg.Provider {
+			case "llm":
+				// Use LLM-based reranker
+				if ragclient.llmProvider != nil {
+					rr = &post.LLMReranker{
+						Provider: ragclient.llmProvider,
+						Model:    rerankCfg.Model,
+					}
+				}
+			case "keyword":
+				// Use keyword-based reranker
+				rr = &post.KeywordReranker{
+					MinKeywordLength: 3,
+					BaseScoreWeight:  0.5,
+				}
+			case "model":
+				// Use model-based reranker (BGE-reranker, Cohere rerank, etc.)
+				rr = &post.ModelReranker{
+					Endpoint: rerankCfg.Endpoint,
+					Model:    rerankCfg.Model,
+					APIKey:   rerankCfg.APIKey,
+				}
+			default:
+				// Default to HTTP reranker for backward compatibility
+				rr = post.NewHTTPReranker(rerankCfg.Endpoint)
+			}
 		}
+
+		// Initialize CRAG components
 		var ev crag.Evaluator
+		var webSearcher *crag.WebSearcher
+		var queryRewriter *crag.QueryRewriter
+		var refiner *crag.KnowledgeRefiner
+
 		if ragclient.config.Pipeline.CRAG != nil {
 			cragCfg := ragclient.config.Pipeline.CRAG
+
+			// Initialize evaluator (HTTP or LLM-based)
 			if cragCfg.Evaluator.Provider == "http" && cragCfg.Evaluator.Endpoint != "" {
 				ev = &crag.HTTPEvaluator{
 					Endpoint:    cragCfg.Evaluator.Endpoint,
 					CorrectTh:   cragCfg.Evaluator.Correct,
 					IncorrectTh: cragCfg.Evaluator.Incorrect,
 				}
+			} else if cragCfg.Evaluator.Provider == "llm" && ragclient.llmProvider != nil {
+				// Use LLM-based evaluator
+				ev = &crag.LLMEvaluator{
+					Provider:    ragclient.llmProvider,
+					CorrectTh:   cragCfg.Evaluator.Correct,
+					IncorrectTh: cragCfg.Evaluator.Incorrect,
+				}
+			}
+
+			// Initialize web searcher from CRAG config or retriever config
+			for _, rc := range ragclient.config.Pipeline.Retrievers {
+				if rc.Type == "web" {
+					webSearcher = &crag.WebSearcher{
+						Provider: rc.Provider,
+						Endpoint: rc.Params["endpoint"],
+						APIKey:   rc.Params["api_key"],
+					}
+					break
+				}
+			}
+
+			// Initialize query rewriter if LLM available
+			if ragclient.llmProvider != nil {
+				queryRewriter = &crag.QueryRewriter{
+					Provider: ragclient.llmProvider,
+				}
+				refiner = &crag.KnowledgeRefiner{
+					Provider: ragclient.llmProvider,
+				}
 			}
 		}
-		ragclient.orch = &orchestrator.Orchestrator{Cfg: ragclient.config, Retrievers: rets, Reranker: rr, Evaluator: ev}
+
+		// Initialize Pre-Retrieve Provider if enabled
+		var preRetrieveProvider pre_retrieve.Provider
+		if ragclient.config.Pipeline.EnablePre && ragclient.config.Pipeline.PreRetrieve != nil {
+			preRetCfg := ragclient.config.Pipeline.PreRetrieve
+			// Set LLM config if available
+			if ragclient.llmProvider != nil {
+				preRetCfg.LLM = ragclient.config.LLM
+			}
+			
+			provider, err := pre_retrieve.NewPreRetrieveProvider(preRetCfg)
+			if err != nil {
+				// Log warning but don't fail - pre-retrieve is optional
+				fmt.Printf("[WARN] Failed to initialize pre-retrieve provider: %v\n", err)
+			} else {
+				preRetrieveProvider = provider
+			}
+		}
+
+		ragclient.orch = &orchestrator.Orchestrator{
+			Cfg:                 ragclient.config,
+			Retrievers:          rets,
+			Reranker:            rr,
+			Evaluator:           ev,
+			WebSearcher:         webSearcher,
+			QueryRewriter:       queryRewriter,
+			Refiner:             refiner,
+			LLMProvider:         ragclient.llmProvider,
+			PreRetrieveProvider: preRetrieveProvider,
+		}
 	}
 	return ragclient, nil
 }

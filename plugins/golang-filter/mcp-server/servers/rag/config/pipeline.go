@@ -11,8 +11,10 @@ type PipelineConfig struct {
     // RRF fusion parameter for hybrid retrieval; typical default 60
     RRFK int `json:"rrf_k,omitempty" yaml:"rrf_k,omitempty"`
 
-    // Pre stage configuration
+    // Pre stage configuration (deprecated, use PreRetrieve for full features)
     Pre *PreConfig `json:"pre,omitempty" yaml:"pre,omitempty"`
+    // Advanced Pre-Retrieve configuration (complete PreQRAG implementation)
+    PreRetrieve *PreRetrieveConfig `json:"pre_retrieve,omitempty" yaml:"pre_retrieve,omitempty"`
     // Retrieval backends
     Retrievers []RetrieverConfig `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
     // Post stage configuration
@@ -51,9 +53,11 @@ type RetrieverConfig struct {
 type PostConfig struct {
     Rerank struct {
         Enable   bool   `json:"enable,omitempty" yaml:"enable,omitempty"`
-        Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+        Provider string `json:"provider,omitempty" yaml:"provider,omitempty"` // "http", "llm", "keyword", "model"
         Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
         TopN     int    `json:"top_n,omitempty" yaml:"top_n,omitempty"`
+        Model    string `json:"model,omitempty" yaml:"model,omitempty"`       // For model-based reranker
+        APIKey   string `json:"api_key,omitempty" yaml:"api_key,omitempty"`   // For model-based reranker
     } `json:"rerank" yaml:"rerank"`
     Compress struct {
         Enable      bool    `json:"enable,omitempty" yaml:"enable,omitempty"`
