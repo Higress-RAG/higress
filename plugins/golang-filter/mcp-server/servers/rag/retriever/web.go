@@ -18,6 +18,7 @@ type WebSearchRetriever struct {
     Endpoint string
     APIKey   string
     Client   *httpx.Client
+    MaxTopK  int
 }
 
 func (r *WebSearchRetriever) Type() string { return "web" }
@@ -35,6 +36,7 @@ type bingResponse struct {
 func (r *WebSearchRetriever) Search(ctx context.Context, query string, topK int) ([]schema.SearchResult, error) {
     if r.Endpoint == "" || r.APIKey == "" { return []schema.SearchResult{}, nil }
     if topK <= 0 { topK = 10 }
+    if r.MaxTopK > 0 && r.MaxTopK < topK { topK = r.MaxTopK }
     u, err := url.Parse(r.Endpoint)
     if err != nil { return nil, err }
     q := u.Query()

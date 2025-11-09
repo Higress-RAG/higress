@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package rag.precontract.v1;
+
+option go_package = "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/proto/precontract/v1;precontractv1";
+
+service Preprocessor {
+  rpc Generate(PreprocessRequest) returns (PreprocessResponse);
+}
+
+message PreprocessRequest {
+  string query = 1;
+  string session_id = 2;
+  string locale = 3;
+  repeated ConversationTurn history = 4;
+  map<string, string> metadata = 5;
+}
+
+message ConversationTurn {
+  enum Role {
+    ROLE_UNSPECIFIED = 0;
+    ROLE_USER = 1;
+    ROLE_ASSISTANT = 2;
+    ROLE_SYSTEM = 3;
+  }
+  Role role = 1;
+  string content = 2;
+}
+
+message PreprocessResponse {
+  string version = 1;
+  string trace_id = 2;
+  QueryMeta query_meta = 3;
+  repeated IntentPrediction intents = 4;
+  repeated Entity entities = 5;
+  repeated QueryTransformation transformations = 6;
+  Decomposition decomposition = 7;
+  ExecutionConstraints constraints = 8;
+  TelemetryInfo telemetry = 9;
+}
+
+message QueryMeta {
+  string raw = 1;
+  string normalized = 2;
+  string language = 3;
+  string session_hash = 4;
+  int64 observed_at_ms = 5;
+}
+
+message IntentPrediction {
+  IntentClass intent = 1;
+  double confidence = 2;
+  string suggested_profile = 3;
+  string fallback_profile = 4;
+  bool requires_web = 5;
+  bool requires_multi_doc = 6;
+  string notes = 7;
+}
+
+enum IntentClass {
+  INTENT_CLASS_UNSPECIFIED = 0;
+  INTENT_CLASS_FACTOID = 1;
+  INTENT_CLASS_COMPARISON = 2;
+  INTENT_CLASS_MULTIHOP = 3;
+  INTENT_CLASS_EXPLORATORY = 4;
+  INTENT_CLASS_SUMMARIZATION = 5;
+  INTENT_CLASS_REALTIME = 6;
+  INTENT_CLASS_OTHER = 7;
+}
+
+message Entity {
+  string surface = 1;
+  string canonical = 2;
+  string type = 3;
+  string knowledge_id = 4;
+  double salience = 5;
+  int32 start = 6;
+  int32 end = 7;
+}
+
+message QueryTransformation {
+  string transform_id = 1;
+  TransformationType type = 2;
+  repeated string channels = 3;
+  int32 priority = 4;
+  string text = 5;
+  string metadata_json = 6;
+  repeated string recommended_retrievers = 7;
+  string model = 8;
+}
+
+enum TransformationType {
+  TRANSFORMATION_TYPE_UNSPECIFIED = 0;
+  TRANSFORMATION_TYPE_DENSE_REWRITE = 1;
+  TRANSFORMATION_TYPE_SPARSE_KEYWORD = 2;
+  TRANSFORMATION_TYPE_HYDE_SEED = 3;
+  TRANSFORMATION_TYPE_QUERY_EXPANSION = 4;
+  TRANSFORMATION_TYPE_NEGATIVE_BOOST = 5;
+  TRANSFORMATION_TYPE_SLOT_FILL = 6;
+}
+
+message Decomposition {
+  repeated Task tasks = 1;
+}
+
+message Task {
+  string task_id = 1;
+  string goal = 2;
+  string query_text = 3;
+  repeated string depends_on = 4;
+  repeated string expected_sources = 5;
+  AggregationHint aggregation_hint = 6;
+}
+
+enum AggregationHint {
+  AGGREGATION_HINT_UNSPECIFIED = 0;
+  AGGREGATION_HINT_COUNT = 1;
+  AGGREGATION_HINT_COMPARISON = 2;
+  AGGREGATION_HINT_SUMMARIZE = 3;
+  AGGREGATION_HINT_REASON = 4;
+}
+
+message ExecutionConstraints {
+  int32 latency_budget_ms = 1;
+  int32 per_retriever_timeout_ms = 2;
+  int32 max_transformations = 3;
+  int32 max_candidates_per_retriever = 4;
+  UrgencyLevel urgency = 5;
+}
+
+enum UrgencyLevel {
+  URGENCY_LEVEL_UNSPECIFIED = 0;
+  URGENCY_LEVEL_NORMAL = 1;
+  URGENCY_LEVEL_ELEVATED = 2;
+  URGENCY_LEVEL_CRITICAL = 3;
+}
+
+message TelemetryInfo {
+  string classifier_version = 1;
+  string rewrite_model = 2;
+  string decomposition_model = 3;
+  repeated string rule_hits = 4;
+  string notes = 5;
+}
+
