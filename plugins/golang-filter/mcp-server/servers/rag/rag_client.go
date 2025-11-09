@@ -161,6 +161,21 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 			}
 		}
 
+		// Initialize Compressor if enabled
+		var compressor post.Compressor
+		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Compress.Enable {
+			compressCfg := ragclient.config.Pipeline.Post.Compress
+			method := compressCfg.Method
+			if method == "" {
+				method = "truncate" // Default method
+			}
+			targetRatio := compressCfg.TargetRatio
+			if targetRatio == 0 {
+				targetRatio = 0.7 // Default ratio
+			}
+			compressor = post.NewCompressor(method, targetRatio, ragclient.llmProvider)
+		}
+
 		// Initialize Pre-Retrieve Provider if enabled
 		var preRetrieveProvider pre_retrieve.Provider
 		if ragclient.config.Pipeline.EnablePre && ragclient.config.Pipeline.PreRetrieve != nil {
@@ -183,6 +198,7 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 			Cfg:                 ragclient.config,
 			Retrievers:          rets,
 			Reranker:            rr,
+			Compressor:          compressor,
 			Evaluator:           ev,
 			WebSearcher:         webSearcher,
 			QueryRewriter:       queryRewriter,

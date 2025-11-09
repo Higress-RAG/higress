@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/httpx"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/logger"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
 )
@@ -132,14 +133,14 @@ func (l *LLMReranker) Rerank(ctx context.Context, query string, in []schema.Sear
 		return in, nil
 	}
 
-	logInfof("LLMReranker: reranking %d documents...", len(in))
+	logger.Infof("LLMReranker: reranking %d documents...", len(in))
 
 	scored := make([]schema.SearchResult, 0, len(in))
 
 	for i, result := range in {
 		// Progress logging every 5 documents
 		if i%5 == 0 {
-			logInfof("LLMReranker: scoring document %d/%d...", i+1, len(in))
+			logger.Infof("LLMReranker: scoring document %d/%d...", i+1, len(in))
 		}
 
 		// Build user prompt
@@ -155,7 +156,7 @@ Rate this document's relevance to the query on a scale from 0 to 10:`, query, re
 		// Get LLM response
 		response, err := l.Provider.GenerateCompletion(ctx, fullPrompt)
 		if err != nil {
-			logWarnf("LLMReranker: failed to score document %d: %v, using original score", i, err)
+			logger.Warnf("LLMReranker: failed to score document %d: %v, using original score", i, err)
 			// Use original score scaled to 0-10
 			result.Score = result.Score * 10
 			scored = append(scored, result)
@@ -173,11 +174,11 @@ Rate this document's relevance to the query on a scale from 0 to 10:`, query, re
 			if err == nil {
 				score = parsed
 			} else {
-				logWarnf("LLMReranker: failed to parse score from '%s', using original score", scoreText)
+				logger.Warnf("LLMReranker: failed to parse score from '%s', using original score", scoreText)
 				score = result.Score * 10
 			}
 		} else {
-			logWarnf("LLMReranker: could not extract score from response: '%s', using original score", scoreText)
+			logger.Warnf("LLMReranker: could not extract score from response: '%s', using original score", scoreText)
 			score = result.Score * 10
 		}
 
@@ -195,7 +196,7 @@ Rate this document's relevance to the query on a scale from 0 to 10:`, query, re
 		scored = scored[:topN]
 	}
 
-	logInfof("LLMReranker: reranked to top %d documents", len(scored))
+	logger.Infof("LLMReranker: reranked to top %d documents", len(scored))
 	return scored, nil
 }
 
@@ -220,7 +221,7 @@ func (k *KeywordReranker) Rerank(ctx context.Context, query string, in []schema.
 		baseWeight = 0.5
 	}
 
-	logInfof("KeywordReranker: reranking %d documents based on keywords...", len(in))
+	logger.Infof("KeywordReranker: reranking %d documents based on keywords...", len(in))
 
 	// Extract keywords from query (words longer than minLen)
 	keywords := make([]string, 0)
@@ -230,7 +231,7 @@ func (k *KeywordReranker) Rerank(ctx context.Context, query string, in []schema.
 		}
 	}
 
-	logInfof("KeywordReranker: extracted %d keywords: %v", len(keywords), keywords)
+	logger.Infof("KeywordReranker: extracted %d keywords: %v", len(keywords), keywords)
 
 	scored := make([]schema.SearchResult, 0, len(in))
 
@@ -277,7 +278,7 @@ func (k *KeywordReranker) Rerank(ctx context.Context, query string, in []schema.
 		scored = scored[:topN]
 	}
 
-	logInfof("KeywordReranker: reranked to top %d documents", len(scored))
+	logger.Infof("KeywordReranker: reranked to top %d documents", len(scored))
 	return scored, nil
 }
 
@@ -318,7 +319,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 		return in, nil
 	}
 
-	logInfof("ModelReranker: reranking %d documents using model %s...", len(in), m.Model)
+	logger.Infof("ModelReranker: reranking %d documents using model %s...", len(in), m.Model)
 
 	// Prepare documents for reranking
 	documents := make([]string, len(in))
@@ -337,7 +338,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 	bs, _ := json.Marshal(reqBody)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(bs))
 	if err != nil {
-		logWarnf("ModelReranker: failed to create request: %v", err)
+		logger.Warnf("ModelReranker: failed to create request: %v", err)
 		if topN > 0 && len(in) > topN {
 			return append([]schema.SearchResult(nil), in[:topN]...), nil
 		}
@@ -355,7 +356,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 
 	resp, err := m.Client.Do(httpReq)
 	if err != nil {
-		logWarnf("ModelReranker: request failed: %v, using original order", err)
+		logger.Warnf("ModelReranker: request failed: %v, using original order", err)
 		if topN > 0 && len(in) > topN {
 			return append([]schema.SearchResult(nil), in[:topN]...), nil
 		}
@@ -364,7 +365,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		logWarnf("ModelReranker: server returned status %d, using original order", resp.StatusCode)
+		logger.Warnf("ModelReranker: server returned status %d, using original order", resp.StatusCode)
 		if topN > 0 && len(in) > topN {
 			return append([]schema.SearchResult(nil), in[:topN]...), nil
 		}
@@ -373,7 +374,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 
 	var rerankResp modelRerankResp
 	if err := json.NewDecoder(resp.Body).Decode(&rerankResp); err != nil {
-		logWarnf("ModelReranker: failed to decode response: %v", err)
+		logger.Warnf("ModelReranker: failed to decode response: %v", err)
 		if topN > 0 && len(in) > topN {
 			return append([]schema.SearchResult(nil), in[:topN]...), nil
 		}
@@ -381,7 +382,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 	}
 
 	if len(rerankResp.Results) == 0 {
-		logWarnf("ModelReranker: empty results, using original order")
+		logger.Warnf("ModelReranker: empty results, using original order")
 		if topN > 0 && len(in) > topN {
 			return append([]schema.SearchResult(nil), in[:topN]...), nil
 		}
@@ -408,7 +409,7 @@ func (m *ModelReranker) Rerank(ctx context.Context, query string, in []schema.Se
 		out = out[:topN]
 	}
 
-	logInfof("ModelReranker: reranked to top %d documents", len(out))
+	logger.Infof("ModelReranker: reranked to top %d documents", len(out))
 	return out, nil
 }
 
@@ -423,23 +424,4 @@ func min(a, b float64) float64 {
 	return b
 }
 
-// Helper logging functions that only log when api is available
-func logInfof(format string, args ...interface{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Silently ignore logging errors in tests
-		}
-	}()
-	// Note: Using fmt.Printf for now, can be replaced with proper logger
-	fmt.Printf("[INFO] "+format+"\n", args...)
-}
-
-func logWarnf(format string, args ...interface{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Silently ignore logging errors in tests
-		}
-	}()
-	// Note: Using fmt.Printf for now, can be replaced with proper logger
-	fmt.Printf("[WARN] "+format+"\n", args...)
-}
+// Note: Logging functions are now in common/logger package
