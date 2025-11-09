@@ -1,13 +1,13 @@
 package rag
 
 import (
-    "errors"
-    "fmt"
-    "strings"
+	"errors"
+	"fmt"
+	"strings"
 
-    "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
-    "github.com/alibaba/higress/plugins/golang-filter/mcp-session/common"
-    "github.com/mark3labs/mcp-go/mcp"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-session/common"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 const Version = "1.0.0"
@@ -36,19 +36,19 @@ func init() {
 				Temperature: 0.5,
 				MaxTokens:   2048,
 			},
-            Embedding: config.EmbeddingConfig{
-                Provider:   "",
-                APIKey:     "",
-                BaseURL:    "",
-                Model:      "",
-                Dimensions: 0,
-            },
-            VectorDB: config.VectorDBConfig{
-                Provider:   "",
-                Host:       "",
-                Port:       0,
-                Database:   "",
-                Collection: "",
+			Embedding: config.EmbeddingConfig{
+				Provider:   "",
+				APIKey:     "",
+				BaseURL:    "",
+				Model:      "",
+				Dimensions: 0,
+			},
+			VectorDB: config.VectorDBConfig{
+				Provider:   "",
+				Host:       "",
+				Port:       0,
+				Database:   "",
+				Collection: "",
 				Username:   "",
 				Password:   "",
 				Mapping: config.MappingConfig{
@@ -246,33 +246,57 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 	// Optional: parse enhanced pipeline configuration
 	if pipelineConfig, ok := cfg["pipeline"].(map[string]any); ok {
 		pc := &config.PipelineConfig{}
-		if v, ok := pipelineConfig["enable_pre"].(bool); ok { pc.EnablePre = v }
-		if v, ok := pipelineConfig["enable_hybrid"].(bool); ok { pc.EnableHybrid = v }
-		if v, ok := pipelineConfig["enable_post"].(bool); ok { pc.EnablePost = v }
-		if v, ok := pipelineConfig["enable_crag"].(bool); ok { pc.EnableCRAG = v }
-		if v, ok := pipelineConfig["rrf_k"].(float64); ok { pc.RRFK = int(v) }
+		if v, ok := pipelineConfig["enable_pre"].(bool); ok {
+			pc.EnablePre = v
+		}
+		if v, ok := pipelineConfig["enable_hybrid"].(bool); ok {
+			pc.EnableHybrid = v
+		}
+		if v, ok := pipelineConfig["enable_post"].(bool); ok {
+			pc.EnablePost = v
+		}
+		if v, ok := pipelineConfig["enable_crag"].(bool); ok {
+			pc.EnableCRAG = v
+		}
+		if v, ok := pipelineConfig["rrf_k"].(float64); ok {
+			pc.RRFK = int(v)
+		}
 
 		// pre
 		if pre, ok := pipelineConfig["pre"].(map[string]any); ok {
 			pc.Pre = &config.PreConfig{}
 			if cls, ok := pre["classifier"].(map[string]any); ok {
-				if b, ok := cls["enable_rules"].(bool); ok { pc.Pre.Classifier.EnableRules = b }
-				if b, ok := cls["enable_model"].(bool); ok { pc.Pre.Classifier.EnableModel = b }
+				if b, ok := cls["enable_rules"].(bool); ok {
+					pc.Pre.Classifier.EnableRules = b
+				}
+				if b, ok := cls["enable_model"].(bool); ok {
+					pc.Pre.Classifier.EnableModel = b
+				}
 			}
 			if rw, ok := pre["rewrite"].(map[string]any); ok {
-				if b, ok := rw["enable"].(bool); ok { pc.Pre.Rewrite.Enable = b }
+				if b, ok := rw["enable"].(bool); ok {
+					pc.Pre.Rewrite.Enable = b
+				}
 				if arr, ok := rw["variants"].([]any); ok {
 					for _, v := range arr {
-						if s, ok := v.(string); ok { pc.Pre.Rewrite.Variants = append(pc.Pre.Rewrite.Variants, s) }
+						if s, ok := v.(string); ok {
+							pc.Pre.Rewrite.Variants = append(pc.Pre.Rewrite.Variants, s)
+						}
 					}
 				}
 			}
 			if de, ok := pre["decompose"].(map[string]any); ok {
-				if b, ok := de["enable"].(bool); ok { pc.Pre.Decompose.Enable = b }
+				if b, ok := de["enable"].(bool); ok {
+					pc.Pre.Decompose.Enable = b
+				}
 			}
 			if svc, ok := pre["service"].(map[string]any); ok {
-				if s, ok := svc["provider"].(string); ok { pc.Pre.Service.Provider = s }
-				if s, ok := svc["endpoint"].(string); ok { pc.Pre.Service.Endpoint = s }
+				if s, ok := svc["provider"].(string); ok {
+					pc.Pre.Service.Provider = s
+				}
+				if s, ok := svc["endpoint"].(string); ok {
+					pc.Pre.Service.Endpoint = s
+				}
 			}
 		}
 
@@ -281,12 +305,18 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 			for _, it := range rets {
 				if m, ok := it.(map[string]any); ok {
 					rc := config.RetrieverConfig{}
-					if s, ok := m["type"].(string); ok { rc.Type = s }
-					if s, ok := m["provider"].(string); ok { rc.Provider = s }
+					if s, ok := m["type"].(string); ok {
+						rc.Type = s
+					}
+					if s, ok := m["provider"].(string); ok {
+						rc.Provider = s
+					}
 					if p, ok := m["params"].(map[string]any); ok {
 						rc.Params = map[string]string{}
 						for k, v := range p {
-							if sv, ok := v.(string); ok { rc.Params[k] = sv }
+							if sv, ok := v.(string); ok {
+								rc.Params[k] = sv
+							}
 						}
 					}
 					pc.Retrievers = append(pc.Retrievers, rc)
@@ -299,21 +329,43 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 			for _, it := range profiles {
 				if m, ok := it.(map[string]any); ok {
 					prof := config.RetrievalProfile{}
-					if s, ok := m["name"].(string); ok { prof.Name = s }
-					if s, ok := m["intent"].(string); ok { prof.Intent = s }
+					if s, ok := m["name"].(string); ok {
+						prof.Name = s
+					}
+					if s, ok := m["intent"].(string); ok {
+						prof.Intent = s
+					}
 					if arr, ok := m["retrievers"].([]any); ok {
 						for _, a := range arr {
-							if s, ok := a.(string); ok { prof.Retrievers = append(prof.Retrievers, s) }
+							if s, ok := a.(string); ok {
+								prof.Retrievers = append(prof.Retrievers, s)
+							}
 						}
 					}
-					if v, ok := m["top_k"].(float64); ok { prof.TopK = int(v) }
-					if v, ok := m["threshold"].(float64); ok { prof.Threshold = v }
-					if b, ok := m["use_web"].(bool); ok { prof.UseWeb = b }
-					if v, ok := m["max_fanout"].(float64); ok { prof.MaxFanout = int(v) }
-					if v, ok := m["vector_gate"].(float64); ok { prof.VectorGate = v }
-					if v, ok := m["vector_low_gate"].(float64); ok { prof.VectorLowGate = v }
-					if b, ok := m["force_web_on_low"].(bool); ok { prof.ForceWebOnLow = b }
-					if v, ok := m["per_retriever_top_k"].(float64); ok { prof.PerRetrieverTopK = int(v) }
+					if v, ok := m["top_k"].(float64); ok {
+						prof.TopK = int(v)
+					}
+					if v, ok := m["threshold"].(float64); ok {
+						prof.Threshold = v
+					}
+					if b, ok := m["use_web"].(bool); ok {
+						prof.UseWeb = b
+					}
+					if v, ok := m["max_fanout"].(float64); ok {
+						prof.MaxFanout = int(v)
+					}
+					if v, ok := m["vector_gate"].(float64); ok {
+						prof.VectorGate = v
+					}
+					if v, ok := m["vector_low_gate"].(float64); ok {
+						prof.VectorLowGate = v
+					}
+					if b, ok := m["force_web_on_low"].(bool); ok {
+						prof.ForceWebOnLow = b
+					}
+					if v, ok := m["per_retriever_top_k"].(float64); ok {
+						prof.PerRetrieverTopK = int(v)
+					}
 					pc.RetrievalProfiles = append(pc.RetrievalProfiles, prof)
 				}
 			}
@@ -326,15 +378,29 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 		if post, ok := pipelineConfig["post"].(map[string]any); ok {
 			pc.Post = &config.PostConfig{}
 			if rr, ok := post["rerank"].(map[string]any); ok {
-				if b, ok := rr["enable"].(bool); ok { pc.Post.Rerank.Enable = b }
-				if s, ok := rr["provider"].(string); ok { pc.Post.Rerank.Provider = s }
-				if s, ok := rr["endpoint"].(string); ok { pc.Post.Rerank.Endpoint = s }
-				if v, ok := rr["top_n"].(float64); ok { pc.Post.Rerank.TopN = int(v) }
+				if b, ok := rr["enable"].(bool); ok {
+					pc.Post.Rerank.Enable = b
+				}
+				if s, ok := rr["provider"].(string); ok {
+					pc.Post.Rerank.Provider = s
+				}
+				if s, ok := rr["endpoint"].(string); ok {
+					pc.Post.Rerank.Endpoint = s
+				}
+				if v, ok := rr["top_n"].(float64); ok {
+					pc.Post.Rerank.TopN = int(v)
+				}
 			}
 			if cmp, ok := post["compress"].(map[string]any); ok {
-				if b, ok := cmp["enable"].(bool); ok { pc.Post.Compress.Enable = b }
-				if s, ok := cmp["method"].(string); ok { pc.Post.Compress.Method = s }
-				if f, ok := cmp["target_ratio"].(float64); ok { pc.Post.Compress.TargetRatio = f }
+				if b, ok := cmp["enable"].(bool); ok {
+					pc.Post.Compress.Enable = b
+				}
+				if s, ok := cmp["method"].(string); ok {
+					pc.Post.Compress.Method = s
+				}
+				if f, ok := cmp["target_ratio"].(float64); ok {
+					pc.Post.Compress.TargetRatio = f
+				}
 			}
 		}
 
@@ -342,38 +408,74 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 		if crag, ok := pipelineConfig["crag"].(map[string]any); ok {
 			pc.CRAG = &config.CRAGConfig{}
 			if ev, ok := crag["evaluator"].(map[string]any); ok {
-				if s, ok := ev["provider"].(string); ok { pc.CRAG.Evaluator.Provider = s }
-				if s, ok := ev["endpoint"].(string); ok { pc.CRAG.Evaluator.Endpoint = s }
-				if f, ok := ev["correct"].(float64); ok { pc.CRAG.Evaluator.Correct = f }
-				if f, ok := ev["incorrect"].(float64); ok { pc.CRAG.Evaluator.Incorrect = f }
+				if s, ok := ev["provider"].(string); ok {
+					pc.CRAG.Evaluator.Provider = s
+				}
+				if s, ok := ev["endpoint"].(string); ok {
+					pc.CRAG.Evaluator.Endpoint = s
+				}
+				if f, ok := ev["correct"].(float64); ok {
+					pc.CRAG.Evaluator.Correct = f
+				}
+				if f, ok := ev["incorrect"].(float64); ok {
+					pc.CRAG.Evaluator.Incorrect = f
+				}
 			}
-			if b, ok := crag["strict"].(bool); ok { pc.CRAG.Strict = b }
-			if s, ok := crag["fail_mode"].(string); ok { pc.CRAG.FailMode = s }
-			if v, ok := crag["max_iters"].(float64); ok { pc.CRAG.MaxIters = int(v) }
+			if b, ok := crag["strict"].(bool); ok {
+				pc.CRAG.Strict = b
+			}
+			if s, ok := crag["fail_mode"].(string); ok {
+				pc.CRAG.FailMode = s
+			}
+			if v, ok := crag["max_iters"].(float64); ok {
+				pc.CRAG.MaxIters = int(v)
+			}
 		}
 
 		// session
 		if sess, ok := pipelineConfig["session"].(map[string]any); ok {
 			pc.Session = &config.SessionConfig{}
-			if s, ok := sess["store"].(string); ok { pc.Session.Store = s }
-			if v, ok := sess["ttl_seconds"].(float64); ok { pc.Session.TTLSeconds = int(v) }
+			if s, ok := sess["store"].(string); ok {
+				pc.Session.Store = s
+			}
+			if v, ok := sess["ttl_seconds"].(float64); ok {
+				pc.Session.TTLSeconds = int(v)
+			}
 			if r, ok := sess["redis"].(map[string]any); ok {
 				pc.Session.Redis = map[string]interface{}{}
-				for k, v := range r { pc.Session.Redis[k] = v }
+				for k, v := range r {
+					pc.Session.Redis[k] = v
+				}
 			}
 		}
 
 		// http defaults
 		if httpCfg, ok := pipelineConfig["http"].(map[string]any); ok {
 			pc.HTTP = &config.HTTPClientConfig{}
-			if v, ok := httpCfg["timeout_ms"].(float64); ok { pc.HTTP.TimeoutMs = int(v) }
-			if v, ok := httpCfg["retry"].(float64); ok { pc.HTTP.Retry = int(v) }
-			if v, ok := httpCfg["backoff_min_ms"].(float64); ok { pc.HTTP.BackoffMinMs = int(v) }
-			if v, ok := httpCfg["backoff_max_ms"].(float64); ok { pc.HTTP.BackoffMaxMs = int(v) }
-			if v, ok := httpCfg["max_consecutive_failures"].(float64); ok { pc.HTTP.MaxConsecutiveFailures = int(v) }
-			if v, ok := httpCfg["circuit_open_seconds"].(float64); ok { pc.HTTP.CircuitOpenSeconds = int(v) }
+			if v, ok := httpCfg["timeout_ms"].(float64); ok {
+				pc.HTTP.TimeoutMs = int(v)
+			}
+			if v, ok := httpCfg["retry"].(float64); ok {
+				pc.HTTP.Retry = int(v)
+			}
+			if v, ok := httpCfg["backoff_min_ms"].(float64); ok {
+				pc.HTTP.BackoffMinMs = int(v)
+			}
+			if v, ok := httpCfg["backoff_max_ms"].(float64); ok {
+				pc.HTTP.BackoffMaxMs = int(v)
+			}
+			if v, ok := httpCfg["max_consecutive_failures"].(float64); ok {
+				pc.HTTP.MaxConsecutiveFailures = int(v)
+			}
+			if v, ok := httpCfg["circuit_open_seconds"].(float64); ok {
+				pc.HTTP.CircuitOpenSeconds = int(v)
+			}
 			if arr, ok := httpCfg["host_allowlist"].([]any); ok {
-				for _, a := range arr { if s, ok := a.(string); ok { pc.HTTP.HostAllowlist = append(pc.HTTP.HostAllowlist, s) } }
+				for _, a := range arr {
+					if s, ok := a.(string); ok {
+						pc.HTTP.HostAllowlist = append(pc.HTTP.HostAllowlist, s)
+					}
+				}
 			}
 		}
 
@@ -390,11 +492,17 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 			seen[prof.Name] = struct{}{}
 		}
 		// validate retriever references are resolvable against configured retrievers
-		allowed := map[string]struct{}{ "vector": {} }
+		allowed := map[string]struct{}{"vector": {}}
 		for _, rc := range c.config.Pipeline.Retrievers {
-			if rc.Type != "" { allowed[normalizeKey(rc.Type)] = struct{}{} }
-			if rc.Type != "" && rc.Provider != "" { allowed[normalizeKey(rc.Type+":"+rc.Provider)] = struct{}{} }
-			if name, ok := rc.Params["name"]; ok && name != "" { allowed[normalizeKey(name)] = struct{}{} }
+			if rc.Type != "" {
+				allowed[normalizeKey(rc.Type)] = struct{}{}
+			}
+			if rc.Type != "" && rc.Provider != "" {
+				allowed[normalizeKey(rc.Type+":"+rc.Provider)] = struct{}{}
+			}
+			if name, ok := rc.Params["name"]; ok && name != "" {
+				allowed[normalizeKey(name)] = struct{}{}
+			}
 		}
 		for _, prof := range c.config.Pipeline.RetrievalProfiles {
 			for _, ref := range prof.Retrievers {
@@ -416,11 +524,17 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 }
 
 func normalizeKey(s string) string {
-    if s == "" { return s }
-    // trim spaces and lower
-    var b []rune
-    for _, r := range s { if r != ' ' && r != '\t' && r != '\n' { b = append(b, r) } }
-    return strings.ToLower(string(b))
+	if s == "" {
+		return s
+	}
+	// trim spaces and lower
+	var b []rune
+	for _, r := range s {
+		if r != ' ' && r != '\t' && r != '\n' {
+			b = append(b, r)
+		}
+	}
+	return strings.ToLower(string(b))
 }
 
 func (c *RAGConfig) NewServer(serverName string) (*common.MCPServer, error) {
