@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/logger"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/crag"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/fusion"
@@ -20,6 +21,7 @@ type Orchestrator struct {
 	Cfg                 *config.Config
 	Retrievers          []retriever.Retriever
 	Reranker            post.Reranker
+	Compressor          post.Compressor // Context compressor
 	Evaluator           crag.Evaluator
 	WebSearcher         *crag.WebSearcher
 	QueryRewriter       *crag.QueryRewriter
@@ -122,11 +124,22 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 		fused = rr
 	}
 
-	// Optional context compression per document
+	// Optional context compression
 	if pc.EnablePost && o.Cfg.Pipeline.Post != nil && o.Cfg.Pipeline.Post.Compress.Enable {
-		ratio := o.Cfg.Pipeline.Post.Compress.TargetRatio
-		for i := range fused {
-			fused[i].Document.Content = post.CompressText(fused[i].Document.Content, ratio)
+		if o.Compressor != nil {
+			// Use advanced compressor with query awareness
+			compressed, err := o.Compressor.BatchCompress(ctx, fused, query)
+			if err != nil {
+				logWarnf("Compression failed: %v, using uncompressed results", err)
+			} else if len(compressed) > 0 {
+				fused = compressed
+			}
+		} else {
+			// Fallback to simple truncate compression (backward compatibility)
+			ratio := o.Cfg.Pipeline.Post.Compress.TargetRatio
+			for i := range fused {
+				fused[i].Document.Content = post.CompressText(fused[i].Document.Content, ratio)
+			}
 		}
 	}
 
@@ -179,15 +192,7 @@ func (o *Orchestrator) Run(ctx context.Context, query string) ([]schema.SearchRe
 	return fused, nil
 }
 
-// Helper logging functions
+// Helper logging functions delegate to unified logger
 func logWarnf(format string, args ...interface{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Silently ignore logging errors
-		}
-	}()
-	// Note: Using a simple print for now, can be replaced with proper logger
-	// fmt.Printf("[WARN] "+format+"\n", args...)
-	_ = format
-	_ = args
+	logger.Warnf(format, args...)
 }

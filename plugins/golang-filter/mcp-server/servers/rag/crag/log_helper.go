@@ -1,25 +1,15 @@
 package crag
 
-import "github.com/envoyproxy/envoy/contrib/golang/common/go/api"
+import "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/logger"
 
-// Helper logging functions that only log when api is available.
-// These are used throughout the crag package to avoid panics in unit tests.
+// Helper logging functions for the crag package.
+// These delegate to the unified logger.
 
 func logInfof(format string, args ...interface{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Silently ignore logging errors in tests
-		}
-	}()
-	api.LogInfof(format, args...)
+	logger.Infof(format, args...)
 }
 
 func logWarnf(format string, args ...interface{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			// Silently ignore logging errors in tests
-		}
-	}()
-	api.LogWarnf(format, args...)
+	logger.Warnf(format, args...)
 }
 
