@@ -1,0 +1,405 @@
+# Context Compression Configuration Examples
+
+# =============================================================================
+# Example 1: Truncate Compression (Fastest, Default)
+# =============================================================================
+truncate_compression:
+  pipeline:
+    enable_post: true
+    post:
+      compress:
+        enable: true
+        method: truncate    # Simple token-based truncation
+        target_ratio: 0.7   # Keep 70% of tokens
+
+# No LLM required
+# Speed: < 1ms per document
+# Compression: ~30%
+# Best for: Real-time applications
+
+---
+# =============================================================================
+# Example 2: Selective Compression (High Accuracy)
+# =============================================================================
+selective_compression:
+  pipeline:
+    enable_post: true
+    post:
+      compress:
+        enable: true
+        method: selective  # LLM-based relevance filtering
+
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-3.5-turbo
+    temperature: 0  # Deterministic filtering
+
+# Speed: 1-3s per document
+# Compression: ~50-70%
+# Best for: When exact quotes are needed
+
+---
+# =============================================================================
+# Example 3: Summary Compression (Maximum Compression)
+# =============================================================================
+summary_compression:
+  pipeline:
+    enable_post: true
+    post:
+      compress:
+        enable: true
+        method: summary  # LLM-based summarization
+
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-3.5-turbo
+    temperature: 0.3
+
+# Speed: 1-3s per document
+# Compression: ~70-90% (highest)
+# Best for: General queries, cost optimization
+
+---
+# =============================================================================
+# Example 4: Extraction Compression (Sentence Extraction)
+# =============================================================================
+extraction_compression:
+  pipeline:
+    enable_post: true
+    post:
+      compress:
+        enable: true
+        method: extraction  # Extract relevant sentences
+
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-3.5-turbo
+    temperature: 0
+
+# Speed: 1-3s per document
+# Compression: ~60-80%
+# Best for: Factual queries, structured docs
+
+---
+# =============================================================================
+# Example 5: Complete Pipeline with Compression
+# =============================================================================
+complete_pipeline:
+  rag:
+    top_k: 20  # Retrieve many candidates
+    threshold: 0.5
+  
+  pipeline:
+    enable_hybrid: true
+    enable_post: true
+    enable_crag: true
+    
+    # Hybrid retrieval
+    retrievers:
+      - type: vector
+      - type: bm25
+        provider: elasticsearch
+        params:
+          endpoint: "http://localhost:9200"
+          index: "documents"
+    
+    # Post-processing
+    post:
+      # Step 1: Rerank to top 5 most relevant
+      rerank:
+        enable: true
+        provider: model
+        endpoint: "https://api.jina.ai/v1/rerank"
+        model: "bge-reranker-large"
+        top_n: 5
+      
+      # Step 2: Compress each of the 5 documents
+      compress:
+        enable: true
+        method: selective  # Keep exact relevant content
+    
+    # CRAG evaluation on compressed docs
+    crag:
+      evaluator:
+        provider: llm
+        correct: 0.7
+        incorrect: 0.3
+  
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-4o
+    temperature: 0.3
+
+---
+# =============================================================================
+# Example 6: Fast Pipeline (Real-time)
+# =============================================================================
+fast_pipeline:
+  rag:
+    top_k: 10
+  
+  pipeline:
+    enable_post: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: keyword  # Fast keyword reranking
+        top_n: 3
+      
+      compress:
+        enable: true
+        method: truncate   # Fast truncation
+        target_ratio: 0.6
+
+# Total latency: < 50ms
+# Quality: Good for simple queries
+
+---
+# =============================================================================
+# Example 7: High-Accuracy Pipeline (Slow but Best)
+# =============================================================================
+high_accuracy_pipeline:
+  rag:
+    top_k: 30  # Get many candidates
+  
+  pipeline:
+    enable_hybrid: true
+    enable_post: true
+    enable_crag: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: llm      # Best reranking
+        model: gpt-4
+        top_n: 10
+      
+      compress:
+        enable: true
+        method: selective  # Preserve exact wording
+  
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-4
+    temperature: 0
+
+# Total latency: 10-20s
+# Quality: Highest
+# Cost: Higher
+
+---
+# =============================================================================
+# Example 8: Cost-Optimized Pipeline
+# =============================================================================
+cost_optimized:
+  rag:
+    top_k: 10
+  
+  pipeline:
+    enable_post: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: model         # Good accuracy, lower cost
+        endpoint: "https://api.jina.ai/v1/rerank"
+        model: "bge-reranker-base"
+        top_n: 3
+      
+      compress:
+        enable: true
+        method: truncate        # No LLM cost
+        target_ratio: 0.6
+  
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-3.5-turbo      # Cheaper model
+
+# Balance: Good quality, reasonable cost
+
+---
+# =============================================================================
+# Example 9: Hybrid Compression Strategy
+# =============================================================================
+hybrid_compression:
+  rag:
+    top_k: 15
+  
+  pipeline:
+    enable_post: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: model
+        top_n: 5
+      
+      # For implementation: could add custom logic to use
+      # different compression for different doc types/lengths
+      compress:
+        enable: true
+        method: selective
+        target_ratio: 0.7  # Fallback for truncate
+
+# Custom orchestrator logic could:
+# - Use truncate for docs < 500 chars
+# - Use selective for docs 500-2000 chars
+# - Use summary for docs > 2000 chars
+
+---
+# =============================================================================
+# Comparison of Strategies
+# =============================================================================
+
+# Truncate Strategy
+# ─────────────────
+# Speed:       ⚡⚡⚡ < 1ms
+# Compression: ⭐⭐ 30-50%
+# Accuracy:    ⭐⭐ Medium (may cut mid-sentence)
+# Cost:        FREE
+# Query-aware: ❌ No
+# Use when:    Real-time, simple docs
+
+# Selective Strategy
+# ──────────────────
+# Speed:       ⚡ 1-3s
+# Compression: ⭐⭐⭐⭐ 50-70%
+# Accuracy:    ⭐⭐⭐⭐⭐ Very High (preserves exact wording)
+# Cost:        $ Medium
+# Query-aware: ✅ Yes
+# Use when:    Need exact quotes, high accuracy
+
+# Summary Strategy
+# ────────────────
+# Speed:       ⚡ 1-3s
+# Compression: ⭐⭐⭐⭐⭐ 70-90% (best)
+# Accuracy:    ⭐⭐⭐⭐ High (may paraphrase)
+# Cost:        $ Medium
+# Query-aware: ✅ Yes
+# Use when:    Maximum compression, cost optimization
+
+# Extraction Strategy
+# ───────────────────
+# Speed:       ⚡ 1-3s
+# Compression: ⭐⭐⭐⭐ 60-80%
+# Accuracy:    ⭐⭐⭐⭐⭐ Very High (exact sentences)
+# Cost:        $ Medium
+# Query-aware: ✅ Yes
+# Use when:    Factual queries, sentence-level precision
+
+---
+# =============================================================================
+# Decision Tree
+# =============================================================================
+
+# Choose compression strategy:
+#
+# Do you need real-time response (< 100ms)?
+# ├─ YES → Use TRUNCATE
+# └─ NO  → Do you have LLM provider configured?
+#     ├─ NO  → Use TRUNCATE
+#     └─ YES → What's your priority?
+#         ├─ Maximum compression → SUMMARY
+#         ├─ Exact quotes → SELECTIVE
+#         ├─ Factual extraction → EXTRACTION
+#         └─ Balanced → SELECTIVE
+
+---
+# =============================================================================
+# Migration Examples
+# =============================================================================
+
+# From basic RAG to compressed RAG:
+#
+# Before:
+# rag:
+#   top_k: 5
+#
+# After:
+# rag:
+#   top_k: 20         # Get more candidates
+#
+# pipeline:
+#   enable_post: true
+#   post:
+#     rerank:
+#       enable: true
+#       provider: model
+#       top_n: 5       # Narrow to 5
+#     
+#     compress:
+#       enable: true
+#       method: summary  # Compress each
+#
+# Result: Better quality answers with same final context size
+
+---
+# =============================================================================
+# Troubleshooting Guide
+# =============================================================================
+
+# Problem: Compression removes important information
+# Solution:
+#   1. Switch from 'summary' to 'selective' or 'extraction'
+#   2. Use higher target_ratio for truncate
+#   3. Improve reranking to get more relevant docs first
+
+# Problem: Compression is too slow
+# Solution:
+#   1. Use 'truncate' method
+#   2. Reduce number of documents before compression
+#   3. Use faster LLM model
+#   4. Disable compression for simple queries
+
+# Problem: Empty compressed results
+# Solution:
+#   - System automatically falls back to originals
+#   - Check if documents are actually relevant to query
+#   - Try different compression method
+#   - Verify LLM configuration
+
+# Problem: High LLM costs
+# Solution:
+#   1. Use 'truncate' for simple queries
+#   2. Compress only top 3 documents
+#   3. Cache compression results
+#   4. Use cheaper LLM model (gpt-3.5-turbo)
+
+---
+# =============================================================================
+# Performance Tuning
+# =============================================================================
+
+# For High Throughput:
+performance_tuned:
+  post:
+    rerank:
+      top_n: 3           # Compress fewer docs
+    compress:
+      method: truncate   # Fastest
+      target_ratio: 0.6
+
+# For Best Quality:
+quality_tuned:
+  post:
+    rerank:
+      top_n: 10          # More diverse docs
+    compress:
+      method: selective  # Best accuracy
+
+# For Cost Optimization:
+cost_tuned:
+  post:
+    rerank:
+      provider: keyword  # Free reranking
+      top_n: 3           # Compress fewer
+    compress:
+      method: summary    # High compression = less tokens to LLM
+

@@ -20,7 +20,9 @@ import (
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/gating"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/metrics"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/orchestrator"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/post"
+	pre_retrieve "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/pre-retrieve"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/profile"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retrieval"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/retriever"
@@ -56,6 +58,7 @@ type RAGClient struct {
 	cacheMode          string
 	indexVersion       string
 	cacheFusionVersion string
+	orch               *orchestrator.Orchestrator
 }
 
 // NewRAGClient creates a new RAG client instance
@@ -250,19 +253,134 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 			ragclient.cacheMode = mode
 		}
 
+		// Initialize reranker with support for multiple providers
+		var rr post.Reranker
 		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Rerank.Enable {
-			ragclient.reranker = post.NewHTTPReranker(ragclient.config.Pipeline.Post.Rerank.Endpoint)
+			rerankCfg := ragclient.config.Pipeline.Post.Rerank
+			switch rerankCfg.Provider {
+			case "llm":
+				// Use LLM-based reranker
+				if ragclient.llmProvider != nil {
+					rr = &post.LLMReranker{
+						Provider: ragclient.llmProvider,
+						Model:    rerankCfg.Model,
+					}
+				}
+			case "keyword":
+				// Use keyword-based reranker
+				rr = &post.KeywordReranker{
+					MinKeywordLength: 3,
+					BaseScoreWeight:  0.5,
+				}
+			case "model":
+				// Use model-based reranker (BGE-reranker, Cohere rerank, etc.)
+				rr = &post.ModelReranker{
+					Endpoint: rerankCfg.Endpoint,
+					Model:    rerankCfg.Model,
+					APIKey:   rerankCfg.APIKey,
+				}
+			default:
+				// Default to HTTP reranker for backward compatibility
+				rr = post.NewHTTPReranker(rerankCfg.Endpoint)
+			}
 		}
+
+		// Initialize CRAG components (for orchestrator)
+		var ev crag.Evaluator
+		var webSearcher *crag.WebSearcher
+		var queryRewriter *crag.QueryRewriter
+		var refiner *crag.KnowledgeRefiner
 
 		if ragclient.config.Pipeline.CRAG != nil {
 			cragCfg := ragclient.config.Pipeline.CRAG
+
+			// Initialize evaluator (HTTP or LLM-based)
 			if cragCfg.Evaluator.Provider == "http" && cragCfg.Evaluator.Endpoint != "" {
-				ragclient.evaluator = &crag.HTTPEvaluator{
+				httpEval := &crag.HTTPEvaluator{
 					Endpoint:    cragCfg.Evaluator.Endpoint,
 					CorrectTh:   cragCfg.Evaluator.Correct,
 					IncorrectTh: cragCfg.Evaluator.Incorrect,
 				}
+				ragclient.evaluator = httpEval
+				ev = httpEval
+			} else if cragCfg.Evaluator.Provider == "llm" && ragclient.llmProvider != nil {
+				// Use LLM-based evaluator
+				llmEval := &crag.LLMEvaluator{
+					Provider:    ragclient.llmProvider,
+					CorrectTh:   cragCfg.Evaluator.Correct,
+					IncorrectTh: cragCfg.Evaluator.Incorrect,
+				}
+				ragclient.evaluator = llmEval
+				ev = llmEval
 			}
+
+			// Initialize web searcher from CRAG config or retriever config
+			for _, rc := range ragclient.config.Pipeline.Retrievers {
+				if rc.Type == "web" {
+					webSearcher = &crag.WebSearcher{
+						Provider: rc.Provider,
+						Endpoint: rc.Params["endpoint"],
+						APIKey:   rc.Params["api_key"],
+					}
+					break
+				}
+			}
+
+			// Initialize query rewriter if LLM available
+			if ragclient.llmProvider != nil {
+				queryRewriter = &crag.QueryRewriter{
+					Provider: ragclient.llmProvider,
+				}
+				refiner = &crag.KnowledgeRefiner{
+					Provider: ragclient.llmProvider,
+				}
+			}
+		}
+
+		// Initialize Compressor if enabled
+		var compressor post.Compressor
+		if ragclient.config.Pipeline.Post != nil && ragclient.config.Pipeline.Post.Compress.Enable {
+			compressCfg := ragclient.config.Pipeline.Post.Compress
+			method := compressCfg.Method
+			if method == "" {
+				method = "truncate" // Default method
+			}
+			targetRatio := compressCfg.TargetRatio
+			if targetRatio == 0 {
+				targetRatio = 0.7 // Default ratio
+			}
+			compressor = post.NewCompressor(method, targetRatio, ragclient.llmProvider)
+		}
+
+		// Initialize Pre-Retrieve Provider if enabled
+		var preRetrieveProvider pre_retrieve.Provider
+		if ragclient.config.Pipeline.EnablePre && ragclient.config.Pipeline.PreRetrieve != nil {
+			preRetCfg := ragclient.config.Pipeline.PreRetrieve
+			// Set LLM config if available
+			if ragclient.llmProvider != nil {
+				preRetCfg.LLM = ragclient.config.LLM
+			}
+
+			provider, err := pre_retrieve.NewPreRetrieveProvider(preRetCfg)
+			if err != nil {
+				// Log warning but don't fail - pre-retrieve is optional
+				fmt.Printf("[WARN] Failed to initialize pre-retrieve provider: %v\n", err)
+			} else {
+				preRetrieveProvider = provider
+			}
+		}
+
+		ragclient.orch = &orchestrator.Orchestrator{
+			Cfg:                 ragclient.config,
+			Retrievers:          retrievers,
+			Reranker:            rr,
+			Compressor:          compressor,
+			Evaluator:           ev,
+			WebSearcher:         webSearcher,
+			QueryRewriter:       queryRewriter,
+			Refiner:             refiner,
+			LLMProvider:         ragclient.llmProvider,
+			PreRetrieveProvider: preRetrieveProvider,
 		}
 	}
 	return ragclient, nil
@@ -520,13 +638,20 @@ func (r *RAGClient) runEnhancedPipeline(ctx context.Context, query string) []sch
 			if r.feedbackManager != nil {
 				r.feedbackManager.Record(prof.Name, verdict, 0)
 			}
+			// Build ActionContext for CRAG actions
+			actionCtx := &crag.ActionContext{
+				Query:   query,
+				Context: ctx,
+				// WebSearcher, QueryRewriter, and Refiner would be available via orchestrator
+				// For direct RAGClient usage, they are optional
+			}
 			switch verdict {
 			case crag.VerdictCorrect:
-				results = crag.CorrectAction(results)
+				results = crag.CorrectAction(actionCtx, results)
 			case crag.VerdictIncorrect:
-				results = crag.IncorrectAction()
+				results = crag.IncorrectAction(actionCtx)
 			case crag.VerdictAmbiguous:
-				results = crag.AmbiguousAction(results, nil)
+				results = crag.AmbiguousAction(actionCtx, results, nil)
 			}
 			if metricsRecord != nil {
 				metricsRecord.CRAGEnabled = true

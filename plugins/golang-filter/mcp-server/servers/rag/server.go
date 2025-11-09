@@ -390,6 +390,12 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 				if v, ok := rr["top_n"].(float64); ok {
 					pc.Post.Rerank.TopN = int(v)
 				}
+				if s, ok := rr["model"].(string); ok {
+					pc.Post.Rerank.Model = s
+				}
+				if s, ok := rr["api_key"].(string); ok {
+					pc.Post.Rerank.APIKey = s
+				}
 			}
 			if cmp, ok := post["compress"].(map[string]any); ok {
 				if b, ok := cmp["enable"].(bool); ok {

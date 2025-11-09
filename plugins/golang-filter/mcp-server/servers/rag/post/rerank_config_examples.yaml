@@ -1,0 +1,320 @@
+# Reranking Configuration Examples
+
+# =============================================================================
+# Example 1: LLM-based Reranking (Highest Accuracy)
+# =============================================================================
+llm_reranking:
+  pipeline:
+    enable_post: true
+    post:
+      rerank:
+        enable: true
+        provider: llm      # Use LLM to score documents
+        top_n: 5           # Return top 5 after reranking
+        model: gpt-3.5-turbo  # Optional: specify model
+  
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-3.5-turbo
+    temperature: 0       # Deterministic scoring
+
+---
+# =============================================================================
+# Example 2: Keyword-based Reranking (Fastest, No External Calls)
+# =============================================================================
+keyword_reranking:
+  pipeline:
+    enable_post: true
+    post:
+      rerank:
+        enable: true
+        provider: keyword  # Simple keyword matching
+        top_n: 5
+
+---
+# =============================================================================
+# Example 3: Model-based Reranking (BGE Reranker)
+# =============================================================================
+model_reranking_bge:
+  pipeline:
+    enable_post: true
+    post:
+      rerank:
+        enable: true
+        provider: model
+        endpoint: "https://api.example.com/v1/rerank"  # Your BGE reranker endpoint
+        model: "bge-reranker-large"
+        api_key: your-api-key  # If required
+        top_n: 5
+
+---
+# =============================================================================
+# Example 4: Model-based Reranking (Cohere Rerank API)
+# =============================================================================
+model_reranking_cohere:
+  pipeline:
+    enable_post: true
+    post:
+      rerank:
+        enable: true
+        provider: model
+        endpoint: "https://api.cohere.ai/v1/rerank"
+        model: "rerank-multilingual-v2.0"
+        api_key: your-cohere-api-key
+        top_n: 5
+
+---
+# =============================================================================
+# Example 5: HTTP Reranker (Custom Service)
+# =============================================================================
+http_reranking:
+  pipeline:
+    enable_post: true
+    post:
+      rerank:
+        enable: true
+        provider: http    # or leave empty for default
+        endpoint: "http://localhost:8081/rerank"
+        top_n: 5
+
+---
+# =============================================================================
+# Example 6: Complete RAG Pipeline with Reranking
+# =============================================================================
+complete_pipeline:
+  # Basic RAG config
+  rag:
+    top_k: 20          # Retrieve more candidates initially
+    threshold: 0.5
+  
+  # Enhanced pipeline
+  pipeline:
+    enable_hybrid: true   # Multi-source retrieval
+    enable_post: true     # Enable post-processing
+    enable_crag: true     # Enable CRAG
+    
+    # Hybrid retrieval
+    rrf_k: 60
+    retrievers:
+      - type: vector
+      - type: web
+        provider: duckduckgo
+    
+    # Post-processing
+    post:
+      # Reranking
+      rerank:
+        enable: true
+        provider: model         # Use model-based reranker
+        endpoint: "https://api.jina.ai/v1/rerank"
+        model: "bge-reranker-large"
+        api_key: your-jina-api-key
+        top_n: 5               # Narrow down to top 5
+      
+      # Compression
+      compress:
+        enable: true
+        target_ratio: 0.7
+    
+    # CRAG
+    crag:
+      evaluator:
+        provider: llm
+        correct: 0.7
+        incorrect: 0.3
+      fail_mode: open
+  
+  # LLM config (for CRAG evaluator and LLM reranker if used)
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-4o
+    temperature: 0.3
+  
+  # Embedding config
+  embedding:
+    provider: openai
+    api_key: your-openai-api-key
+    model: text-embedding-3-small
+  
+  # Vector DB config
+  vectordb:
+    provider: milvus
+    host: localhost
+    port: 19530
+    database: rag_db
+    collection: documents
+
+---
+# =============================================================================
+# Example 7: Fast Pipeline for Real-time Applications
+# =============================================================================
+fast_pipeline:
+  rag:
+    top_k: 10
+  
+  pipeline:
+    enable_post: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: keyword   # Fast, no external calls
+        top_n: 5
+
+---
+# =============================================================================
+# Example 8: High-Accuracy Pipeline (Slower but Best Quality)
+# =============================================================================
+high_accuracy_pipeline:
+  rag:
+    top_k: 30  # Get more candidates for better recall
+  
+  pipeline:
+    enable_hybrid: true
+    enable_post: true
+    enable_crag: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: llm      # Most accurate
+        model: gpt-4       # Best model
+        top_n: 10          # Keep more results
+    
+    crag:
+      evaluator:
+        provider: llm
+        correct: 0.8       # Stricter threshold
+        incorrect: 0.2
+  
+  llm:
+    provider: openai
+    api_key: your-openai-api-key
+    model: gpt-4
+    temperature: 0
+
+---
+# =============================================================================
+# Example 9: Cost-Optimized Pipeline
+# =============================================================================
+cost_optimized:
+  rag:
+    top_k: 10
+  
+  pipeline:
+    enable_post: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: model      # Good accuracy, lower cost than LLM
+        endpoint: "https://api.jina.ai/v1/rerank"
+        model: "bge-reranker-base"  # Smaller model
+        top_n: 5
+
+---
+# =============================================================================
+# Example 10: Two-Stage Reranking (Advanced)
+# =============================================================================
+# Note: This would require custom orchestrator logic
+# First stage: Fast keyword reranking to reduce candidates
+# Second stage: Accurate model reranking on fewer candidates
+
+two_stage_reranking:
+  rag:
+    top_k: 50  # Start with many candidates
+  
+  # In orchestrator, you would:
+  # 1. Keyword rerank 50 -> 20
+  # 2. Model rerank 20 -> 5
+  
+  pipeline:
+    enable_post: true
+    
+    post:
+      rerank:
+        enable: true
+        provider: model  # Final stage uses model
+        endpoint: "https://api.jina.ai/v1/rerank"
+        model: "bge-reranker-large"
+        top_n: 5
+
+---
+# =============================================================================
+# Comparison of Different Strategies
+# =============================================================================
+
+# Performance Characteristics:
+#
+# 1. Keyword Reranker
+#    - Speed: ⚡⚡⚡ Very Fast (< 1ms)
+#    - Accuracy: ⭐⭐⭐ Medium
+#    - Cost: FREE
+#    - Best for: Real-time apps, keyword-heavy queries
+#
+# 2. Model Reranker (BGE, Cohere)
+#    - Speed: ⚡⚡ Fast (10-100ms)
+#    - Accuracy: ⭐⭐⭐⭐ High
+#    - Cost: $0.002-0.02 per 1000 searches
+#    - Best for: Production, balance of accuracy and cost
+#
+# 3. LLM Reranker
+#    - Speed: ⚡ Slow (1-5s for 10 docs)
+#    - Accuracy: ⭐⭐⭐⭐⭐ Very High
+#    - Cost: $0.05-0.50 per 1000 searches
+#    - Best for: Complex queries, when accuracy is critical
+#
+# 4. HTTP Reranker
+#    - Speed: Depends on service
+#    - Accuracy: Depends on service
+#    - Cost: Depends on service
+#    - Best for: Existing infrastructure
+
+---
+# =============================================================================
+# Migration Guide
+# =============================================================================
+
+# From basic RAG to reranked RAG:
+#
+# Before:
+# rag:
+#   top_k: 5
+#
+# After:
+# rag:
+#   top_k: 20  # Increase to get more candidates
+#
+# pipeline:
+#   enable_post: true
+#   post:
+#     rerank:
+#       enable: true
+#       provider: keyword  # Start with keyword
+#       top_n: 5           # Then narrow to 5
+
+---
+# =============================================================================
+# Troubleshooting
+# =============================================================================
+
+# Issue: Reranking is slow
+# Solution: 
+#   1. Use keyword reranker for speed
+#   2. Reduce top_k to get fewer candidates
+#   3. Use smaller models (e.g., gpt-3.5-turbo instead of gpt-4)
+
+# Issue: Reranking not improving results
+# Solution:
+#   1. Try different provider (llm > model > keyword)
+#   2. Increase top_k to get more diverse candidates
+#   3. Check if queries are keyword-heavy (use keyword) or semantic (use llm/model)
+
+# Issue: High cost
+# Solution:
+#   1. Switch from llm to model reranker
+#   2. Use keyword reranker for simple queries
+#   3. Implement caching for frequent queries
+
