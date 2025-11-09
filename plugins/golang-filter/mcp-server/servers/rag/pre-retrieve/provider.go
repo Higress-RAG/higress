@@ -8,6 +8,7 @@ import (
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/embedding"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/memory"
 )
 
 const (
@@ -152,7 +153,7 @@ func (i *PreRetrieveInitializer) CreateProvider(cfg *config.PreRetrieveConfig) (
 	}
 
 	// 1. Memory Intake Processor
-	sessionStore := NewInMemorySessionStore(cfg.Memory.LastNRounds)
+	sessionStore := memory.NewInMemorySessionStore(cfg.Memory.LastNRounds)
 	provider.memoryProcessor = NewMemoryIntakeProcessor(&cfg.Memory, sessionStore, nil)
 
 	// 2. Context Alignment Processor
