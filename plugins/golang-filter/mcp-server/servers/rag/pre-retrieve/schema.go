@@ -1,26 +1,6 @@
 package pre_retrieve
 
-import "time"
-
-// QueryContext 查询上下文，包含原始查询和会话信息
-type QueryContext struct {
-	// 原始用户查询
-	Query string `json:"query"`
-	// 最近 N 轮对话历史
-	LastNRounds []ConversationRound `json:"last_n_rounds,omitempty"`
-	// 相关文档 ID
-	DocIDs []string `json:"doc_ids,omitempty"`
-	// 会话 ID
-	SessionID string `json:"session_id,omitempty"`
-	// 时间戳
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// ConversationRound 对话轮次
-type ConversationRound struct {
-	Question string `json:"question"`
-	Answer   string `json:"answer"`
-}
+import "github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/memory"
 
 // Anchor 锚点信息
 type Anchor struct {
@@ -128,7 +108,7 @@ type HyDEVector struct {
 // PreRetrieveResult Pre-Retrieve 完整结果
 type PreRetrieveResult struct {
 	// 原始上下文
-	Context QueryContext `json:"context"`
+	Context memory.QueryContext `json:"context"`
 	// 对齐后的查询
 	AlignedQuery AlignedQuery `json:"aligned_query"`
 	// 查询计划

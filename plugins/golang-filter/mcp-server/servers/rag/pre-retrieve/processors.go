@@ -2,15 +2,13 @@ package pre_retrieve
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/config"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/embedding"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
-	"github.com/alibaba/higress/plugins/golang-filter/mcp-session/common"
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/memory"
 )
 
 // =============================================================================
@@ -19,14 +17,7 @@ import (
 
 // MemoryIntakeProcessor 记忆采集处理器接口
 type MemoryIntakeProcessor interface {
-	Process(ctx context.Context, rawQuery string, sessionID string) (*QueryContext, error)
-}
-
-// SessionStore 会话存储接口
-type SessionStore interface {
-	GetLastNRounds(ctx context.Context, sessionID string, n int) ([]ConversationRound, error)
-	GetDocIDs(ctx context.Context, sessionID string) ([]string, error)
-	SaveRound(ctx context.Context, sessionID string, round ConversationRound) error
+	Process(ctx context.Context, rawQuery string, sessionID string) (*memory.QueryContext, error)
 }
 
 // ExternalMemoryStore 外部记忆存储接口
@@ -37,11 +28,11 @@ type ExternalMemoryStore interface {
 // DefaultMemoryIntakeProcessor 默认记忆采集处理器
 type DefaultMemoryIntakeProcessor struct {
 	config        *config.MemoryConfig
-	sessionStore  SessionStore
+	sessionStore  memory.ConversationStore
 	externalStore ExternalMemoryStore
 }
 
-func NewMemoryIntakeProcessor(cfg *config.MemoryConfig, sessionStore SessionStore, externalStore ExternalMemoryStore) MemoryIntakeProcessor {
+func NewMemoryIntakeProcessor(cfg *config.MemoryConfig, sessionStore memory.ConversationStore, externalStore ExternalMemoryStore) MemoryIntakeProcessor {
 	return &DefaultMemoryIntakeProcessor{
 		config:        cfg,
 		sessionStore:  sessionStore,
@@ -49,8 +40,8 @@ func NewMemoryIntakeProcessor(cfg *config.MemoryConfig, sessionStore SessionStor
 	}
 }
 
-func (p *DefaultMemoryIntakeProcessor) Process(ctx context.Context, rawQuery string, sessionID string) (*QueryContext, error) {
-	queryCtx := &QueryContext{
+func (p *DefaultMemoryIntakeProcessor) Process(ctx context.Context, rawQuery string, sessionID string) (*memory.QueryContext, error) {
+	queryCtx := &memory.QueryContext{
 		Query:     rawQuery,
 		SessionID: sessionID,
 	}
@@ -76,131 +67,18 @@ func (p *DefaultMemoryIntakeProcessor) Process(ctx context.Context, rawQuery str
 	return queryCtx, nil
 }
 
-// RedisSessionStore Redis 会话存储实现
-type RedisSessionStore struct {
-	redisClient      *common.RedisClient
-	keyPrefix        string
-	sessionExpiry    time.Duration
-	maxHistoryRounds int
-}
-
-func NewRedisSessionStore(redisClient *common.RedisClient, keyPrefix string, sessionExpiry time.Duration, maxHistoryRounds int) SessionStore {
-	if keyPrefix == "" {
-		keyPrefix = "pre-retrieve:session:"
-	}
-	if sessionExpiry == 0 {
-		sessionExpiry = 24 * time.Hour
-	}
-	if maxHistoryRounds == 0 {
-		maxHistoryRounds = 10
-	}
-	return &RedisSessionStore{
-		redisClient:      redisClient,
-		keyPrefix:        keyPrefix,
-		sessionExpiry:    sessionExpiry,
-		maxHistoryRounds: maxHistoryRounds,
-	}
-}
-
-func (s *RedisSessionStore) GetLastNRounds(ctx context.Context, sessionID string, n int) ([]ConversationRound, error) {
-	key := s.keyPrefix + sessionID
-	value, err := s.redisClient.Get(key)
-	if err != nil {
-		return []ConversationRound{}, nil
-	}
-
-	var rounds []ConversationRound
-	if err := json.Unmarshal([]byte(value), &rounds); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session data: %w", err)
-	}
-
-	if len(rounds) <= n {
-		return rounds, nil
-	}
-	return rounds[len(rounds)-n:], nil
-}
-
-func (s *RedisSessionStore) GetDocIDs(ctx context.Context, sessionID string) ([]string, error) {
-	key := s.keyPrefix + sessionID + ":docs"
-	value, err := s.redisClient.Get(key)
-	if err != nil {
-		return []string{}, nil
-	}
-
-	var docIDs []string
-	if err := json.Unmarshal([]byte(value), &docIDs); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal doc IDs: %w", err)
-	}
-	return docIDs, nil
-}
-
-func (s *RedisSessionStore) SaveRound(ctx context.Context, sessionID string, round ConversationRound) error {
-	key := s.keyPrefix + sessionID
-	rounds, _ := s.GetLastNRounds(ctx, sessionID, s.maxHistoryRounds)
-	rounds = append(rounds, round)
-	if len(rounds) > s.maxHistoryRounds {
-		rounds = rounds[len(rounds)-s.maxHistoryRounds:]
-	}
-
-	data, err := json.Marshal(rounds)
-	if err != nil {
-		return fmt.Errorf("failed to marshal rounds: %w", err)
-	}
-	return s.redisClient.Set(key, string(data), s.sessionExpiry)
-}
-
-// InMemorySessionStore 内存会话存储（测试用）
-type InMemorySessionStore struct {
-	sessions  map[string][]ConversationRound
-	docIDs    map[string][]string
-	maxRounds int
-}
-
-func NewInMemorySessionStore(maxRounds int) SessionStore {
-	if maxRounds == 0 {
-		maxRounds = 10
-	}
-	return &InMemorySessionStore{
-		sessions:  make(map[string][]ConversationRound),
-		docIDs:    make(map[string][]string),
-		maxRounds: maxRounds,
-	}
-}
-
-func (s *InMemorySessionStore) GetLastNRounds(ctx context.Context, sessionID string, n int) ([]ConversationRound, error) {
-	rounds := s.sessions[sessionID]
-	if len(rounds) <= n {
-		return rounds, nil
-	}
-	return rounds[len(rounds)-n:], nil
-}
-
-func (s *InMemorySessionStore) GetDocIDs(ctx context.Context, sessionID string) ([]string, error) {
-	return s.docIDs[sessionID], nil
-}
-
-func (s *InMemorySessionStore) SaveRound(ctx context.Context, sessionID string, round ConversationRound) error {
-	rounds := s.sessions[sessionID]
-	rounds = append(rounds, round)
-	if len(rounds) > s.maxRounds {
-		rounds = rounds[len(rounds)-s.maxRounds:]
-	}
-	s.sessions[sessionID] = rounds
-	return nil
-}
-
 // =============================================================================
 // Context Alignment Processor - 上下文对齐
 // =============================================================================
 
 // ContextAlignmentProcessor 上下文对齐处理器接口
 type ContextAlignmentProcessor interface {
-	Process(ctx context.Context, queryCtx *QueryContext) (*AlignedQuery, error)
+	Process(ctx context.Context, queryCtx *memory.QueryContext) (*AlignedQuery, error)
 }
 
 // AnchorCandidateRetriever 锚点候选检索器接口
 type AnchorCandidateRetriever interface {
-	RetrieveCandidates(ctx context.Context, queryCtx *QueryContext) ([]Anchor, error)
+	RetrieveCandidates(ctx context.Context, queryCtx *memory.QueryContext) ([]Anchor, error)
 }
 
 // DefaultContextAlignmentProcessor 默认上下文对齐处理器
@@ -218,7 +96,7 @@ func NewContextAlignmentProcessor(cfg *config.ContextAlignmentConfig, llmProvide
 	}
 }
 
-func (p *DefaultContextAlignmentProcessor) Process(ctx context.Context, queryCtx *QueryContext) (*AlignedQuery, error) {
+func (p *DefaultContextAlignmentProcessor) Process(ctx context.Context, queryCtx *memory.QueryContext) (*AlignedQuery, error) {
 	if !p.config.Enabled {
 		return &AlignedQuery{Query: queryCtx.Query}, nil
 	}
@@ -244,7 +122,7 @@ func (p *DefaultContextAlignmentProcessor) Process(ctx context.Context, queryCtx
 	return alignedQuery, nil
 }
 
-func (p *DefaultContextAlignmentProcessor) integrateContext(ctx context.Context, queryCtx *QueryContext) (string, []string, error) {
+func (p *DefaultContextAlignmentProcessor) integrateContext(ctx context.Context, queryCtx *memory.QueryContext) (string, []string, error) {
 	ops := []string{}
 	query := queryCtx.Query
 
@@ -271,7 +149,7 @@ func (p *DefaultContextAlignmentProcessor) integrateContext(ctx context.Context,
 	return query, ops, nil
 }
 
-func (p *DefaultContextAlignmentProcessor) resolvePronounsWithLLM(ctx context.Context, queryCtx *QueryContext) (string, error) {
+func (p *DefaultContextAlignmentProcessor) resolvePronounsWithLLM(ctx context.Context, queryCtx *memory.QueryContext) (string, error) {
 	history := strings.Builder{}
 	for i, round := range queryCtx.LastNRounds {
 		history.WriteString(fmt.Sprintf("Q%d: %s\nA%d: %s\n", i+1, round.Question, i+1, round.Answer))
@@ -313,7 +191,7 @@ Normalized Query:`, query)
 	return strings.TrimSpace(normalized), nil
 }
 
-func (p *DefaultContextAlignmentProcessor) retrieveAndDecideAnchors(ctx context.Context, queryCtx *QueryContext, alignedQuery string) ([]Anchor, error) {
+func (p *DefaultContextAlignmentProcessor) retrieveAndDecideAnchors(ctx context.Context, queryCtx *memory.QueryContext, alignedQuery string) ([]Anchor, error) {
 	candidates, err := p.anchorCandidateRetriever.RetrieveCandidates(ctx, queryCtx)
 	if err != nil {
 		return []Anchor{}, err
@@ -344,7 +222,7 @@ func NewDefaultAnchorCandidateRetriever() AnchorCandidateRetriever {
 	return &DefaultAnchorCandidateRetriever{}
 }
 
-func (r *DefaultAnchorCandidateRetriever) RetrieveCandidates(ctx context.Context, queryCtx *QueryContext) ([]Anchor, error) {
+func (r *DefaultAnchorCandidateRetriever) RetrieveCandidates(ctx context.Context, queryCtx *memory.QueryContext) ([]Anchor, error) {
 	anchors := []Anchor{}
 	for _, docID := range queryCtx.DocIDs {
 		anchors = append(anchors, Anchor{
@@ -911,10 +789,7 @@ func (p *DefaultHyDEProcessor) shouldGenerateHyDE(node QueryNode) bool {
 		return true
 	}
 	words := strings.Fields(node.Query)
-	if len(words) < 5 {
-		return true
-	}
-	return false
+	return len(words) < 5
 }
 
 func (p *DefaultHyDEProcessor) generateHypotheticalDocument(ctx context.Context, node QueryNode) (string, error) {
