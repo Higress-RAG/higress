@@ -134,7 +134,7 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 		retrievers = append(retrievers, vectorRet)
 		register(vectorRet, "vector", ragclient.config.VectorDB.Provider, "vector")
 
-		// Optional: add BM25 / Web retrievers from config
+		// Optional: add BM25 / Web / Path retrievers from config
 		for _, rc := range ragclient.config.Pipeline.Retrievers {
 			switch rc.Type {
 			case "bm25":
@@ -150,6 +150,21 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 				}
 				retrievers = append(retrievers, bm)
 				register(bm, rc.Type, rc.Provider, rc.Params["name"])
+			case "path":
+				// Path retriever for hierarchical document path-based retrieval
+				pathRet := &retriever.PathRetriever{
+					Endpoint:  rc.Params["endpoint"],
+					Index:     rc.Params["index"],
+					Client:    httpx.NewFromConfig(ragclient.config.Pipeline.HTTP),
+					PathField: rc.Params["path_field"], // e.g., "know_path", "file_path"
+				}
+				if tk := rc.Params["top_k"]; tk != "" {
+					if n, err := strconv.Atoi(tk); err == nil {
+						pathRet.MaxTopK = n
+					}
+				}
+				retrievers = append(retrievers, pathRet)
+				register(pathRet, rc.Type, rc.Provider, rc.Params["name"])
 			case "web":
 				web := &retriever.WebSearchRetriever{
 					Provider: rc.Provider,
@@ -346,7 +361,17 @@ func NewRAGClient(config *config.Config) (*RAGClient, error) {
 			if targetRatio == 0 {
 				targetRatio = 0.7 // Default ratio
 			}
-			ragclient.compressor = post.NewCompressor(method, targetRatio, ragclient.llmProvider)
+			var compressorOpts []post.CompressorOption
+			if compressCfg.Endpoint != "" {
+				compressorOpts = append(compressorOpts,
+					post.WithHTTPEndpoint(compressCfg.Endpoint),
+					post.WithHTTPClient(httpx.NewFromConfig(ragclient.config.Pipeline.HTTP)),
+				)
+			}
+			if len(compressCfg.Headers) > 0 {
+				compressorOpts = append(compressorOpts, post.WithHTTPHeaders(compressCfg.Headers))
+			}
+			ragclient.compressor = post.NewCompressor(method, targetRatio, ragclient.llmProvider, compressorOpts...)
 		}
 
 		// Initialize Pre-Retrieve Provider if enabled

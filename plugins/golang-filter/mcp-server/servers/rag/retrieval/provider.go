@@ -606,7 +606,8 @@ func variantKeyForRetriever(r retriever.Retriever) string {
 	switch strings.ToLower(r.Type()) {
 	case "vector":
 		return "dense"
-	case "bm25":
+	case "bm25", "path":
+		// Both BM25 and Path retrievers are sparse retrieval methods
 		return "sparse"
 	case "web":
 		return "web"

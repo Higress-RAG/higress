@@ -247,6 +247,15 @@ func (c *Config) validatePipeline() ValidationErrors {
 					Message: fmt.Sprintf("compress.target_ratio must be in [0, 1], got %.2f", c.Pipeline.Post.Compress.TargetRatio),
 				})
 			}
+			method := strings.ToLower(c.Pipeline.Post.Compress.Method)
+			if method == "http" || method == "llmlingua" || method == "llm-lingua" {
+				if c.Pipeline.Post.Compress.Endpoint == "" {
+					errs = append(errs, ValidationError{
+						Field:   "pipeline.post.compress.endpoint",
+						Message: "endpoint is required when compress.method is http/llmlingua",
+					})
+				}
+			}
 		}
 	}
 

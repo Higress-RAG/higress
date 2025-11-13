@@ -198,6 +198,16 @@ data:
 #### Embedding
 - **OpenAI 兼容**
 
+### Pipeline Post 阶段
+
+`pipeline.post` 用于控制检索后的 rerank 与上下文压缩流程：
+
+- `rerank`：支持 `provider=http` 通过 `endpoint` 调用外部重排服务，或使用 `llm/keyword/model` 内建策略。
+- `compress`：开启后可选择 `method`：
+  - `truncate`（默认）：按 `target_ratio` 截断文档。
+  - `selective/summary/extraction`：依赖 `llm`，分别执行相关句抽取、摘要或句子提取。
+  - `http`（或 `llmlingua`）：通过 `endpoint` 调用外部压缩服务（例如 LLMLingua 微服务）。可在 `headers` 中设置自定义请求头（如 `Authorization`）。服务返回的文档顺序会作为新的上下文顺序使用。
+
 #### Vector Database
 - **Milvus**
 
@@ -321,7 +331,6 @@ Attu 是 Milvus 的可视化管理工具，用于查看和管理 Milvus 中的�
 docker run -p 8000:3000 -e MILVUS_URL=http://<本机 IP>:19530  zilliz/attu:v2.6
 Open your browser and navigate to http://localhost:8000
 ```
-
 
 
 
