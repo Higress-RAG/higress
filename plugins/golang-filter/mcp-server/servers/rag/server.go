@@ -407,6 +407,17 @@ func (c *RAGConfig) ParseConfig(cfg map[string]any) error {
 				if f, ok := cmp["target_ratio"].(float64); ok {
 					pc.Post.Compress.TargetRatio = f
 				}
+				if s, ok := cmp["endpoint"].(string); ok {
+					pc.Post.Compress.Endpoint = s
+				}
+				if hdrs, ok := cmp["headers"].(map[string]any); ok {
+					pc.Post.Compress.Headers = make(map[string]string, len(hdrs))
+					for hk, hv := range hdrs {
+						if vs, ok := hv.(string); ok {
+							pc.Post.Compress.Headers[hk] = vs
+						}
+					}
+				}
 			}
 		}
 

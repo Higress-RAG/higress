@@ -2,6 +2,9 @@ package post
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -217,6 +220,60 @@ func TestSelectiveCompressor_BatchCompress(t *testing.T) {
 	}
 }
 
+func TestHTTPCompressor_BatchCompress(t *testing.T) {
+	t.Helper()
+
+	var seenHeader bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test") == "1" {
+			seenHeader = true
+		}
+		var req httpCompressRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		if req.TargetRatio != 0.3 {
+			t.Fatalf("expected target ratio 0.3, got %f", req.TargetRatio)
+		}
+		resp := httpCompressResponse{
+			Documents: []httpCompressedDocument{
+				{ID: req.Documents[0].ID, Text: "compressed-1"},
+				{ID: req.Documents[1].ID, Text: "compressed-2"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	compressor := &HTTPCompressor{
+		Endpoint:    server.URL,
+		Headers:     map[string]string{"X-Test": "1"},
+		TargetRatio: 0.3,
+	}
+
+	input := []schema.SearchResult{
+		{Document: schema.Document{ID: "a", Content: "aaaa bbbb cccc"}},
+		{Document: schema.Document{ID: "b", Content: "dddd eeee ffff"}},
+	}
+
+	output, err := compressor.BatchCompress(context.Background(), input, "query")
+	if err != nil {
+		t.Fatalf("BatchCompress failed: %v", err)
+	}
+	if !seenHeader {
+		t.Fatal("expected custom header to be forwarded")
+	}
+	if len(output) != 2 {
+		t.Fatalf("expected 2 documents, got %d", len(output))
+	}
+	if output[0].Document.Content != "compressed-1" {
+		t.Fatalf("unexpected first doc content: %s", output[0].Document.Content)
+	}
+	if output[1].Document.Content != "compressed-2" {
+		t.Fatalf("unexpected second doc content: %s", output[1].Document.Content)
+	}
+}
+
 func TestBatchCompress_AllEmpty(t *testing.T) {
 	mockProvider := &MockCompressorLLMProvider{
 		response: "",
@@ -288,6 +345,13 @@ func TestNewCompressor_FallbackWithoutLLM(t *testing.T) {
 
 	if _, ok := compressor.(*TruncateCompressor); !ok {
 		t.Error("Expected TruncateCompressor as fallback")
+	}
+}
+
+func TestNewCompressor_HTTP(t *testing.T) {
+	compressor := NewCompressor("http", 0.5, nil, WithHTTPEndpoint("http://example.com"))
+	if _, ok := compressor.(*HTTPCompressor); !ok {
+		t.Error("Expected HTTPCompressor")
 	}
 }
 

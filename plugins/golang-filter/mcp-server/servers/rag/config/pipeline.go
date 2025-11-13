@@ -156,9 +156,11 @@ type PostConfig struct {
 		APIKey   string `json:"api_key,omitempty" yaml:"api_key,omitempty"` // For model-based reranker
 	} `json:"rerank" yaml:"rerank"`
 	Compress struct {
-		Enable      bool    `json:"enable,omitempty" yaml:"enable,omitempty"`
-		Method      string  `json:"method,omitempty" yaml:"method,omitempty"`
-		TargetRatio float64 `json:"target_ratio,omitempty" yaml:"target_ratio,omitempty"`
+		Enable      bool              `json:"enable,omitempty" yaml:"enable,omitempty"`
+		Method      string            `json:"method,omitempty" yaml:"method,omitempty"`
+		TargetRatio float64           `json:"target_ratio,omitempty" yaml:"target_ratio,omitempty"`
+		Endpoint    string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+		Headers     map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 	} `json:"compress" yaml:"compress"`
 }
 

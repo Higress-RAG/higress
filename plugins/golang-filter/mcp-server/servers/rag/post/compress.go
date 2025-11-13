@@ -1,10 +1,14 @@
 package post
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/httpx"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/common/logger"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/llm"
 	"github.com/alibaba/higress/plugins/golang-filter/mcp-server/servers/rag/schema"
@@ -357,6 +361,142 @@ func (e *ExtractionCompressor) BatchCompress(ctx context.Context, results []sche
 }
 
 // ================================================================================
+// 5. HTTP Compressor (External microservice, e.g., LLMLingua)
+// ================================================================================
+
+// HTTPCompressor delegates compression to an external HTTP service.
+type HTTPCompressor struct {
+	Endpoint    string
+	Client      *httpx.Client
+	Headers     map[string]string
+	TargetRatio float64
+}
+
+func (h *HTTPCompressor) Compress(ctx context.Context, text string, query string) (string, float64, error) {
+	if h.Endpoint == "" || text == "" {
+		return text, 0, nil
+	}
+	results := []schema.SearchResult{{
+		Document: schema.Document{
+			ID:      "compress-single",
+			Content: text,
+		},
+	}}
+	compressed, err := h.BatchCompress(ctx, results, query)
+	if err != nil || len(compressed) == 0 {
+		return text, 0, err
+	}
+	out := compressed[0].Document.Content
+	if out == "" {
+		return text, 0, err
+	}
+	return out, calculateCompressionRatio(text, out), nil
+}
+
+func (h *HTTPCompressor) BatchCompress(ctx context.Context, results []schema.SearchResult, query string) ([]schema.SearchResult, error) {
+	if h.Endpoint == "" || len(results) == 0 {
+		return results, nil
+	}
+
+	logger.Infof("HTTPCompressor: compressing %d documents via %s", len(results), h.Endpoint)
+
+	req := httpCompressRequest{
+		Query:       query,
+		TargetRatio: h.TargetRatio,
+		Documents:   make([]httpCompressDocument, 0, len(results)),
+	}
+	index := make(map[string]int, len(results))
+	for i, result := range results {
+		docID := result.Document.ID
+		if docID == "" {
+			docID = fmt.Sprintf("compress-%d", i)
+		}
+		index[docID] = i
+		req.Documents = append(req.Documents, httpCompressDocument{
+			ID:       docID,
+			Text:     result.Document.Content,
+			Metadata: result.Document.Metadata,
+		})
+	}
+
+	resp, err := h.doRequest(ctx, &req)
+	if err != nil {
+		logger.Warnf("HTTPCompressor: request failed: %v", err)
+		return results, err
+	}
+	if resp == nil || len(resp.Documents) == 0 {
+		logger.Warnf("HTTPCompressor: empty response, using original results")
+		return results, nil
+	}
+
+	out := make([]schema.SearchResult, 0, len(resp.Documents))
+	for _, doc := range resp.Documents {
+		idx, ok := index[doc.ID]
+		if !ok {
+			continue
+		}
+		item := results[idx]
+		if doc.Text != "" {
+			item.Document.Content = doc.Text
+		}
+		if doc.Metadata != nil {
+			if item.Document.Metadata == nil {
+				item.Document.Metadata = make(map[string]any, len(doc.Metadata))
+			}
+			for k, v := range doc.Metadata {
+				item.Document.Metadata[k] = v
+			}
+		}
+		if doc.Score != 0 {
+			item.Score = doc.Score
+		}
+		out = append(out, item)
+	}
+
+	if len(out) == 0 {
+		logger.Warnf("HTTPCompressor: no matching documents in response, using original results")
+		return results, nil
+	}
+	return out, nil
+}
+
+func (h *HTTPCompressor) doRequest(ctx context.Context, payload *httpCompressRequest) (*httpCompressResponse, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("http compressor marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.Endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("http compressor new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range h.Headers {
+		req.Header.Set(k, v)
+	}
+	client := h.ensureClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http compressor request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http compressor status %d", resp.StatusCode)
+	}
+	var result httpCompressResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("http compressor decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (h *HTTPCompressor) ensureClient() *httpx.Client {
+	if h.Client == nil {
+		h.Client = httpx.NewFromConfig(nil)
+	}
+	return h.Client
+}
+
+// ================================================================================
 // Helper functions
 // ================================================================================
 
@@ -372,13 +512,92 @@ func calculateCompressionRatio(original, compressed string) float64 {
 	return reduction
 }
 
+type httpCompressRequest struct {
+	Query       string                 `json:"query"`
+	TargetRatio float64                `json:"target_ratio,omitempty"`
+	Documents   []httpCompressDocument `json:"documents"`
+}
+
+type httpCompressDocument struct {
+	ID       string         `json:"id"`
+	Text     string         `json:"text"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type httpCompressResponse struct {
+	Documents []httpCompressedDocument `json:"documents"`
+}
+
+type httpCompressedDocument struct {
+	ID       string         `json:"id"`
+	Text     string         `json:"text"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+	Score    float64        `json:"score,omitempty"`
+}
+
 // ================================================================================
 // Compressor Factory
 // ================================================================================
 
+// CompressorOption configures the HTTP/remote compressor factory.
+type CompressorOption func(*compressorOptions)
+
+type compressorOptions struct {
+	endpoint string
+	headers  map[string]string
+	client   *httpx.Client
+}
+
+// WithHTTPEndpoint sets the remote compressor endpoint.
+func WithHTTPEndpoint(endpoint string) CompressorOption {
+	return func(opts *compressorOptions) {
+		opts.endpoint = endpoint
+	}
+}
+
+// WithHTTPHeaders sets static headers (e.g., Authorization) for the HTTP compressor.
+func WithHTTPHeaders(headers map[string]string) CompressorOption {
+	return func(opts *compressorOptions) {
+		if len(headers) == 0 {
+			return
+		}
+		if opts.headers == nil {
+			opts.headers = make(map[string]string, len(headers))
+		}
+		for k, v := range headers {
+			opts.headers[k] = v
+		}
+	}
+}
+
+// WithHTTPClient injects a custom httpx.Client.
+func WithHTTPClient(client *httpx.Client) CompressorOption {
+	return func(opts *compressorOptions) {
+		opts.client = client
+	}
+}
+
 // NewCompressor creates a Compressor based on method and configuration
-func NewCompressor(method string, targetRatio float64, llmProvider llm.Provider) Compressor {
+func NewCompressor(method string, targetRatio float64, llmProvider llm.Provider, opts ...CompressorOption) Compressor {
+	options := compressorOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+
 	switch strings.ToLower(method) {
+	case "http", "llmlingua", "llm-lingua":
+		if options.endpoint == "" {
+			logger.Warnf("HTTP compression requires endpoint, falling back to truncate")
+			return &TruncateCompressor{TargetRatio: targetRatio}
+		}
+		return &HTTPCompressor{
+			Endpoint:    options.endpoint,
+			Client:      options.client,
+			Headers:     options.headers,
+			TargetRatio: targetRatio,
+		}
 	case "selective":
 		if llmProvider == nil {
 			logger.Warnf("Selective compression requires LLM provider, falling back to truncate")
